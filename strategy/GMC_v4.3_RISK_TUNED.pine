@@ -1,0 +1,373 @@
+//@version=5
+// ─── VERSION HISTORY ──────────────────────────────────────────────────────────
+// v4.3 - 15 Jul 2026 - RISK TUNED EDITION
+//                      Data-driven fixes from the v4.2 hardened backtest
+//                      (56 positions, all CASC-T3, 365d OANDA XAUUSD 15m):
+//                      1. US-data blackout: entries whose signal bar falls in
+//                         12:45-13:45 UTC are skipped (fills 13:00-13:45, the
+//                         window straddling 13:30 UTC / 8:30 ET releases).
+//                         In-sample: that hour was -$20.3k (PF 0.13) across 20
+//                         positions; the rest of the day was +$39.7k (PF 2.44).
+//                      2. Loss-streak throttle: risk halves after 2 consecutive
+//                         losing positions, restores on the next winner.
+//                      3. TP ladder exposed as inputs; TP1 default moved
+//                         2.5R -> 1.5R to bank the first third earlier (win
+//                         rate lever - A/B these in one click).
+//                      All v4.2 integrity fixes retained.
+// v4.2 - 15 Jul 2026 - BACKTEST HARDENED EDITION
+//                      1. Trading costs modeled: commission (≈half-spread per
+//                         side) + slippage in the strategy() declaration.
+//                      2. H4 gate no longer repaints: confirmed-bar pattern
+//                         (close[1] + lookahead_on) — backtest == live.
+//                      3. Stop/target levels FROZEN at entry (entry_sl/entry_atr)
+//                         in BOTH trailing and non-trailing branches. Previously
+//                         limits drifted with current-bar ATR after entry.
+//                      4. Cooldown resets on FULL position close, not on every
+//                         partial TP leg (strategy.closedtrades increments per leg).
+//                      5. Entry comments tag signal source (STD / CASC T1-T3) so
+//                         the exported trade list is attributable per subsystem.
+//                      6. Optional leverage cap on position sizing.
+// v4.1 - 06 Jul 2026 - UNLEASHED EDITION - Production locked
+// ─────────────────────────────────────────────────────────────────────────────
+strategy("G MONEY CORE v4.3 - RISK TUNED", overlay=true, initial_capital=100000,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+         max_labels_count=500, calc_on_every_tick=false,
+         commission_type=strategy.commission.cash_per_contract, commission_value=0.15,
+         slippage=3)
+// NOTE: commission_value=0.15/oz per fill ≈ half a $0.30 XAUUSD spread each side.
+// slippage=3 ticks = $0.03/oz per fill. Stress-test by doubling both in
+// Strategy Properties. If you have a Premium plan, also enable Bar Magnifier
+// there (or add use_bar_magnifier=true above) for realistic intrabar fills.
+
+var string G0 = "Capital Allocation"
+risk_percent = input.float(2.0, title="True Risk % Per Trade", minval=0.1, maxval=10.0, group=G0)
+max_leverage = input.float(5.0, title="Max Leverage Cap", minval=1.0, maxval=20.0, group=G0)
+
+var string G7 = "Risk Filters"
+use_news_filter = input.bool(true,             title="US Data Blackout?", group=G7, tooltip="Skip NEW entries whose signal bar falls in this window (UTC, signal-bar start time). Fills land 15m later, so 1245-1345 blocks fills in the 13:00-13:45 hour around 13:30 UTC / 8:30 ET releases (CPI, NFP, claims). Exits are never blocked.")
+news_window     = input.session("1245-1345",   title="Blackout Window UTC", group=G7)
+use_throttle    = input.bool(true,             title="Loss-Streak Throttle?", group=G7, tooltip="After N consecutive losing positions, risk per trade is multiplied down until the next winning position.")
+throttle_after  = input.int(2,                 title="Throttle After N Losses", minval=1, group=G7)
+throttle_mult   = input.float(0.5,             title="Throttled Risk Multiplier", minval=0.1, maxval=1.0, group=G7)
+
+var string G1 = "Core Filters"
+ma_period      = input.int(50,    title="Trend MA Period", group=G1)
+rsi_period     = input.int(14,    title="RSI Period", group=G1)
+vol_period     = input.int(20,    title="Volume MA Period", group=G1)
+vol_mult       = input.float(1.8, title="Volume Surge Multiplier", group=G1)
+wick_threshold = input.float(62.0,title="Min Rejection Wick %", group=G1)
+body_threshold = input.float(33.0,title="Max Candle Body %", group=G1)
+vola_dist      = input.float(90.0,title="Max Volatility Pips", group=G1)
+atr_sl_mult    = input.float(1.8, title="ATR SL Multiplier", group=G1)
+atr_trail_mult = input.float(3.2, title="ATR Trail Multiplier", group=G1)
+
+var string G2 = "Win Rate Control"
+use_buffer         = input.bool(true, title="MA Buffer Zone?", group=G2)
+filter_small_wicks = input.bool(true, title="Filter Small Wicks?", group=G2)
+min_score          = input.int(6,     title="Min Score 6 = Perfect Only", group=G2)
+cooldown_bars      = input.int(12,    title="Cooldown Bars Main", group=G2)
+use_confirm_bar    = input.bool(true, title="Require Confirmation Bar?", group=G2)
+
+var string G3 = "Session Prime Hours"
+use_prime_hours  = input.bool(true,           title="Prime Hours Only?", group=G3)
+london_prime     = input.session("0700-0900", title="London Prime UTC", group=G3)
+ny_prime         = input.session("1300-1500", title="NY Prime UTC", group=G3)
+use_full_session = input.bool(true,           title="Also Allow Full Session?", group=G3)
+london_full      = input.session("0700-1600", title="London Full Session", group=G3)
+ny_full          = input.session("1300-2100", title="NY Full Session", group=G3)
+
+var string G4 = "Exit Management"
+use_trailing = input.bool(true,  title="Enable Trailing Stop?", group=G4)
+be_trigger   = input.float(1.2,  title="Breakeven Trigger x SL", group=G4)
+be_premium   = input.float(0.2,  title="Breakeven Premium x ATR", group=G4)
+tp1_r        = input.float(1.5,  title="TP1 (x SL)", minval=0.5, group=G4, tooltip="v4.2 used 2.5. Average winner only reached ~1.2R, so 2.5R rarely filled - a closer TP1 banks the first third more often (higher win rate, smaller average win). A/B this.")
+tp2_r        = input.float(4.0,  title="TP2 (x SL)", minval=0.5, group=G4)
+tp3_r        = input.float(8.0,  title="Runner Target (x SL)", minval=1.0, group=G4)
+
+var string G5 = "Higher Timeframe"
+use_h4_gate = input.bool(true, title="Use H4 Bias Gate?", group=G5)
+
+var string G6 = "Cascade System"
+use_cascade      = input.bool(true,  title="Enable Cascade?", group=G6)
+cascade_pip_1    = input.float(20.0, title="Tier 1 Pips", group=G6)
+cascade_pip_2    = input.float(30.0, title="Tier 2 Pips", group=G6)
+cascade_pip_3    = input.float(50.0, title="Tier 3 Pips", group=G6)
+cascade_bars     = input.int(4,      title="Bars to Measure", group=G6)
+cascade_vol      = input.float(2.0,  title="Cascade Volume Min", group=G6)
+cascade_cooldown = input.int(6,      title="Cascade Cooldown", group=G6)
+
+// ─── SESSION ───────────────────────────────────────────────────────────────────
+in_london_prime = not na(time(timeframe.period, london_prime))
+in_ny_prime     = not na(time(timeframe.period, ny_prime))
+in_prime_hours  = in_london_prime or in_ny_prime
+in_london_full  = not na(time(timeframe.period, london_full))
+in_ny_full      = not na(time(timeframe.period, ny_full))
+in_full_session = in_london_full or in_ny_full
+in_session      = use_prime_hours ? in_prime_hours : (use_full_session ? in_full_session : true)
+
+// US-data blackout: evaluated on the SIGNAL bar's start time. Blocks new
+// entries only; open positions keep managing/exiting normally.
+in_news = use_news_filter and not na(time(timeframe.period, news_window))
+
+// ─── H4 BIAS (NON-REPAINTING) ──────────────────────────────────────────────────
+// Confirmed-bar pattern: request values offset by [1] with lookahead_on.
+// Historical and realtime bars both see the LAST CLOSED H4 bar — no repaint,
+// backtest behavior matches live behavior exactly.
+[h4_close, h4_ma50, h4_ma50_prev3] = request.security(syminfo.tickerid, "240",
+     [close[1], ta.sma(close, 50)[1], ta.sma(close, 50)[4]],
+     lookahead=barmerge.lookahead_on)
+
+h4_slope_up   = h4_ma50 > h4_ma50_prev3
+h4_slope_down = h4_ma50 < h4_ma50_prev3
+bool h4_bull  = use_h4_gate ? (h4_close > h4_ma50 and h4_slope_up)   : true
+bool h4_bear  = use_h4_gate ? (h4_close < h4_ma50 and h4_slope_down) : true
+
+// ─── CORE CALCULATIONS ─────────────────────────────────────────────────────────
+pip_mult = syminfo.mintick * 10
+atr_val  = ta.atr(14)
+ma_buf   = use_buffer ? (atr_val * 0.35) : 0.0
+ma50     = ta.sma(close, ma_period)
+
+plot(ma50, color=color.new(color.blue, 50), title="MA50", linewidth=1)
+
+bool trend_buy  = close > (ma50 + ma_buf)
+bool trend_sell = close < (ma50 - ma_buf)
+
+bool trend_buy_stable  = ta.lowest(trend_buy  ? 1 : 0, 5) > 0
+bool trend_sell_stable = ta.lowest(trend_sell ? 1 : 0, 5) > 0
+
+ma50_slope_up   = ma50 > ma50[12]
+ma50_slope_down = ma50 < ma50[12]
+
+candle_range = high - low
+lower_wick   = math.min(open, close) - low
+upper_wick   = high - math.max(open, close)
+body_size    = math.abs(open - close)
+avg_candle   = ta.sma(candle_range, 5)
+size_ok      = filter_small_wicks ? (candle_range > avg_candle * 0.75) : true
+
+bool bull_rej = candle_range > 0 and (lower_wick / candle_range * 100 >= wick_threshold) and (body_size / candle_range * 100 <= body_threshold) and size_ok
+bool bear_rej = candle_range > 0 and (upper_wick / candle_range * 100 >= wick_threshold) and (body_size / candle_range * 100 <= body_threshold) and size_ok
+
+avg_vol       = ta.sma(volume, vol_period)
+vol_confirmed = volume >= (avg_vol * vol_mult)
+
+rsi_val        = ta.rsi(close, rsi_period)
+rsi_bull_valid = h4_bull ? (rsi_val >= 45 and rsi_val <= 75) : (rsi_val >= 40 and rsi_val <= 60)
+rsi_bear_valid = h4_bear ? (rsi_val >= 25 and rsi_val <= 55) : (rsi_val >= 40 and rsi_val <= 60)
+
+highest_15 = ta.highest(high, 15)
+lowest_15  = ta.lowest(low, 15)
+vola_ok    = ((highest_15 - lowest_15) / pip_mult) <= vola_dist
+
+// ─── CONFLUENCE SCORES ─────────────────────────────────────────────────────────
+int bull_score = 0
+bull_score := bull_score + (trend_buy_stable ? 1 : 0)
+bull_score := bull_score + (bull_rej         ? 1 : 0)
+bull_score := bull_score + (vol_confirmed    ? 1 : 0)
+bull_score := bull_score + (rsi_bull_valid   ? 1 : 0)
+bull_score := bull_score + (ma50_slope_up    ? 1 : 0)
+bull_score := bull_score + (h4_bull          ? 1 : 0)
+
+int bear_score = 0
+bear_score := bear_score + (trend_sell_stable ? 1 : 0)
+bear_score := bear_score + (bear_rej          ? 1 : 0)
+bear_score := bear_score + (vol_confirmed     ? 1 : 0)
+bear_score := bear_score + (rsi_bear_valid    ? 1 : 0)
+bear_score := bear_score + (ma50_slope_down   ? 1 : 0)
+bear_score := bear_score + (h4_bear           ? 1 : 0)
+
+bool bull_perfect = bull_score >= min_score
+bool bear_perfect = bear_score >= min_score
+
+// ─── CONFIRMATION BAR ──────────────────────────────────────────────────────────
+bool bull_confirmed = use_confirm_bar ? (close > open and close[1] > open[1]) : true
+bool bear_confirmed = use_confirm_bar ? (close < open and close[1] < open[1]) : true
+
+// ─── COOLDOWNS (reset on FULL position close, not per exit leg) ────────────────
+bool position_closed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// ─── LOSS-STREAK THROTTLE ──────────────────────────────────────────────────────
+// Sum the closed legs of each finished position; consecutive losing positions
+// shrink risk until a winner resets it.
+var int legs_at_entry = 0
+var int loss_streak   = 0
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    legs_at_entry := strategy.closedtrades
+if position_closed
+    float pos_pnl = 0.0
+    for i = legs_at_entry to strategy.closedtrades - 1
+        pos_pnl += strategy.closedtrades.profit(i)
+    loss_streak := pos_pnl <= 0 ? loss_streak + 1 : 0
+risk_mult = use_throttle and loss_streak >= throttle_after ? throttle_mult : 1.0
+
+var int bars_since = 999
+bars_since := bars_since + 1
+if position_closed
+    bars_since := 0
+cooldown_ok = bars_since >= cooldown_bars
+
+var int casc_bars = 999
+casc_bars := casc_bars + 1
+if position_closed
+    casc_bars := 0
+casc_cool_ok = casc_bars >= cascade_cooldown
+
+// ─── STANDARD SIGNALS ──────────────────────────────────────────────────────────
+bool buy_signal  = bull_perfect and bull_confirmed and vola_ok and in_session and cooldown_ok
+bool sell_signal = bear_perfect and bear_confirmed and vola_ok and in_session and cooldown_ok
+
+// ─── CASCADE SYSTEM ────────────────────────────────────────────────────────────
+pip_move_down = (ta.highest(high, cascade_bars) - close) / pip_mult
+pip_move_up   = (close - ta.lowest(low, cascade_bars))   / pip_mult
+
+casc_vol_ok   = volume >= (avg_vol * cascade_vol)
+casc_rsi_sell = rsi_val < 50
+casc_rsi_buy  = rsi_val > 50
+casc_size_ok  = candle_range > avg_candle * 1.2
+
+bool casc_sell_t1 = use_cascade and pip_move_down >= cascade_pip_1 and pip_move_down < cascade_pip_2 and casc_vol_ok and h4_bear and casc_rsi_sell and casc_size_ok and in_session and casc_cool_ok and close < ma50
+bool casc_sell_t2 = use_cascade and pip_move_down >= cascade_pip_2 and pip_move_down < cascade_pip_3 and casc_vol_ok and h4_bear and casc_rsi_sell and casc_size_ok and in_session and casc_cool_ok and close < ma50
+bool casc_sell_t3 = use_cascade and pip_move_down >= cascade_pip_3 and casc_vol_ok and h4_bear and casc_rsi_sell and in_session and casc_cool_ok and close < ma50
+bool casc_buy_t1  = use_cascade and pip_move_up >= cascade_pip_1 and pip_move_up < cascade_pip_2 and casc_vol_ok and h4_bull and casc_rsi_buy and casc_size_ok and in_session and casc_cool_ok and close > ma50
+bool casc_buy_t2  = use_cascade and pip_move_up >= cascade_pip_2 and pip_move_up < cascade_pip_3 and casc_vol_ok and h4_bull and casc_rsi_buy and casc_size_ok and in_session and casc_cool_ok and close > ma50
+bool casc_buy_t3  = use_cascade and pip_move_up >= cascade_pip_3 and casc_vol_ok and h4_bull and casc_rsi_buy and in_session and casc_cool_ok and close > ma50
+
+bool casc_sell = casc_sell_t1 or casc_sell_t2 or casc_sell_t3
+bool casc_buy  = casc_buy_t1  or casc_buy_t2  or casc_buy_t3
+
+// ─── FINAL SIGNALS ─────────────────────────────────────────────────────────────
+bool final_buy  = (buy_signal or casc_buy)  and strategy.position_size == 0 and not in_news
+bool final_sell = (sell_signal or casc_sell) and strategy.position_size == 0 and not in_news
+
+// Attribution tags — show up in the trade list / CSV Signal column so each
+// subsystem's edge can be measured separately from the export.
+string buy_tag  = buy_signal  ? "STD-L" : casc_buy_t3  ? "CASC-L3" : casc_buy_t2  ? "CASC-L2" : "CASC-L1"
+string sell_tag = sell_signal ? "STD-S" : casc_sell_t3 ? "CASC-S3" : casc_sell_t2 ? "CASC-S2" : "CASC-S1"
+
+// ─── SIGNAL PLOTS ──────────────────────────────────────────────────────────────
+plotshape(buy_signal,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(sell_signal, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.small)
+plotshape(casc_sell_t1 and not casc_sell_t2 and not casc_sell_t3, title="CASC S T1", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(casc_sell_t2 and not casc_sell_t3,                       title="CASC S T2", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.small)
+plotshape(casc_sell_t3,                                             title="CASC S T3", style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.normal)
+plotshape(casc_buy_t1 and not casc_buy_t2 and not casc_buy_t3,   title="CASC B T1", style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0),   size=size.tiny)
+plotshape(casc_buy_t2 and not casc_buy_t3,                         title="CASC B T2", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.small)
+plotshape(casc_buy_t3,                                              title="CASC B T3", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.normal)
+
+// ─── PROTECTION ENGINE ─────────────────────────────────────────────────────────
+// entry_sl / entry_atr are FROZEN at position open. All stop/target levels are
+// derived from the frozen values, so exits no longer drift with current-bar ATR.
+// Trail distance stays adaptive (chandelier-style) by design.
+var float trail_long  = na
+var float trail_short = na
+var float entry_ref   = na
+var float entry_sl    = na
+var float entry_atr   = na
+var bool  be_on       = false
+var bool  trail_on    = false
+
+trail_dist = atr_val * atr_trail_mult
+
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    entry_ref  := strategy.opentrades.entry_price(0)
+    entry_atr  := atr_val
+    entry_sl   := atr_val * atr_sl_mult
+    be_on      := false
+    trail_on   := false
+    trail_long := entry_ref - entry_sl
+
+if strategy.position_size < 0 and strategy.position_size[1] == 0
+    entry_ref   := strategy.opentrades.entry_price(0)
+    entry_atr   := atr_val
+    entry_sl    := atr_val * atr_sl_mult
+    be_on       := false
+    trail_on    := false
+    trail_short := entry_ref + entry_sl
+
+if strategy.position_size > 0
+    float pd = high - entry_ref
+    if not be_on and pd >= entry_sl * be_trigger
+        trail_long := entry_ref + (entry_atr * be_premium)
+        be_on      := true
+    if pd >= entry_sl * 2.2
+        trail_on := true
+    if trail_on
+        float nt = high - trail_dist
+        if nt > trail_long
+            trail_long := nt
+    if use_trailing and not na(trail_long)
+        strategy.exit("TP1",   "LONG", qty_percent=33, stop=trail_long, limit=entry_ref + entry_sl * tp1_r)
+        strategy.exit("TP2",   "LONG", qty_percent=33, stop=trail_long, limit=entry_ref + entry_sl * tp2_r)
+        strategy.exit("TRAIL", "LONG",                 stop=trail_long, limit=entry_ref + entry_sl * tp3_r)
+
+if strategy.position_size < 0
+    float pd = entry_ref - low
+    if not be_on and pd >= entry_sl * be_trigger
+        trail_short := entry_ref - (entry_atr * be_premium)
+        be_on       := true
+    if pd >= entry_sl * 2.2
+        trail_on := true
+    if trail_on
+        float nt = low + trail_dist
+        if nt < trail_short
+            trail_short := nt
+    if use_trailing and not na(trail_short)
+        strategy.exit("TP1",   "SHORT", qty_percent=33, stop=trail_short, limit=entry_ref - entry_sl * tp1_r)
+        strategy.exit("TP2",   "SHORT", qty_percent=33, stop=trail_short, limit=entry_ref - entry_sl * tp2_r)
+        strategy.exit("TRAIL", "SHORT",                 stop=trail_short, limit=entry_ref - entry_sl * tp3_r)
+
+// ─── ENTRIES ───────────────────────────────────────────────────────────────────
+sl_dist_now = atr_val * atr_sl_mult
+risk_cash   = strategy.equity * (risk_percent / 100.0) * risk_mult
+trade_units = na(sl_dist_now) or sl_dist_now == 0 ? 0.0 : risk_cash / sl_dist_now
+// Leverage cap: position notional may not exceed equity x max_leverage.
+units_cap   = close > 0 ? (strategy.equity * max_leverage) / close : 0.0
+trade_units := math.min(trade_units, units_cap)
+
+if final_buy and strategy.position_size == 0 and trade_units > 0
+    strategy.entry("LONG", strategy.long, qty=trade_units, comment=buy_tag)
+
+if final_sell and strategy.position_size == 0 and trade_units > 0
+    strategy.entry("SHORT", strategy.short, qty=trade_units, comment=sell_tag)
+
+// ─── NON-TRAILING EXITS (LONG + SHORT, frozen levels) ─────────────────────────
+if not use_trailing and strategy.position_size > 0 and not na(entry_ref)
+    strategy.exit("TP1", "LONG", qty_percent=33, stop=entry_ref - entry_sl, limit=entry_ref + entry_sl * tp1_r)
+    strategy.exit("TP2", "LONG", qty_percent=33, stop=entry_ref - entry_sl, limit=entry_ref + entry_sl * tp2_r)
+    strategy.exit("TP3", "LONG",                 stop=entry_ref - entry_sl, limit=entry_ref + entry_sl * tp3_r)
+
+if not use_trailing and strategy.position_size < 0 and not na(entry_ref)
+    strategy.exit("TP1", "SHORT", qty_percent=33, stop=entry_ref + entry_sl, limit=entry_ref - entry_sl * tp1_r)
+    strategy.exit("TP2", "SHORT", qty_percent=33, stop=entry_ref + entry_sl, limit=entry_ref - entry_sl * tp2_r)
+    strategy.exit("TP3", "SHORT",                 stop=entry_ref + entry_sl, limit=entry_ref - entry_sl * tp3_r)
+
+// ─── TRAIL PLOTS ───────────────────────────────────────────────────────────────
+plot(strategy.position_size > 0 and use_trailing ? trail_long  : na, "Trail Long",  color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and use_trailing ? trail_short : na, "Trail Short", color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+
+// ─── DASHBOARD ─────────────────────────────────────────────────────────────────
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.new(color.gray, 70))
+    table.cell(t, 0, 0, "GMC v4.3",    bgcolor=color.new(color.orange, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 0, "RISK TUNED",  bgcolor=color.new(color.orange, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 1, "H4 Bias",     text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 1, h4_bull ? "BULL" : h4_bear ? "BEAR" : "FLAT", bgcolor=h4_bull ? color.new(color.green, 40) : h4_bear ? color.new(color.red, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 2, "Trend",       text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 2, trend_buy ? "BULL" : trend_sell ? "BEAR" : "CHOP", bgcolor=trend_buy ? color.new(color.green, 40) : trend_sell ? color.new(color.red, 40) : color.new(color.orange, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 3, "Bull Score",  text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 3, str.tostring(bull_score) + "/6", bgcolor=bull_score >= 6 ? color.new(color.green, 20) : bull_score >= 4 ? color.new(color.orange, 40) : color.new(color.red, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 4, "Bear Score",  text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 4, str.tostring(bear_score) + "/6", bgcolor=bear_score >= 6 ? color.new(color.red, 20) : bear_score >= 4 ? color.new(color.orange, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 5, "RSI",         text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(rsi_val, "#.#"), bgcolor=(rsi_bull_valid or rsi_bear_valid) ? color.new(color.green, 40) : color.new(color.red, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 6, "Volume",      text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 6, vol_confirmed ? "SURGE" : "LOW", bgcolor=vol_confirmed ? color.new(color.green, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 7, "Session",     text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 7, in_london_prime ? "LONDON" : in_ny_prime ? "NY PRIME" : in_session ? "ACTIVE" : "CLOSED", bgcolor=in_london_prime or in_ny_prime ? color.new(color.green, 20) : in_session ? color.new(color.green, 50) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 8, "Trail",       text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 8, trail_on ? "RUNNING" : be_on ? "BE" : "INIT", bgcolor=trail_on ? color.new(color.green, 40) : be_on ? color.new(color.blue, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 9, "ATR Stop",    text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 9, str.tostring(sl_dist_now / pip_mult, "#.#") + "p", text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 10, "Risk",       text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 10, in_news ? "NEWS BLK" : risk_mult < 1.0 ? "x" + str.tostring(risk_mult, "#.#") + " (" + str.tostring(loss_streak) + "L)" : "FULL", bgcolor=in_news ? color.new(color.red, 40) : risk_mult < 1.0 ? color.new(color.orange, 40) : color.new(color.green, 40), text_color=color.white, text_size=size.tiny)
