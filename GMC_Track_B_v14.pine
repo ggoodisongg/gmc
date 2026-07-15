@@ -1,0 +1,343 @@
+//@version=5
+// ═══════════════════════════════════════════════════════════════════════════
+//  GMC TRACK B v14.0 — SOVEREIGN RISK ENGINE
+//  Rebuild of v13.0 for OANDA:XAUUSD, 15-minute chart.
+//
+//  Entry engine (regime classifier, adaptive Donchian, pullback/breakout,
+//  candle quality, volume) is carried over from v13.0 — it picked good
+//  trades (59% winners). What follows fixes the five defects that produced
+//  the $595k / 30.6% drawdown in the 1,572-trade backtest:
+//
+//  FIX 1 — REAL STOPS. v13 closed on bar close after the stop was breached,
+//          so every loss ran past its stop. v14 uses strategy.exit() stop
+//          orders that fill intrabar at the stop price.
+//  FIX 2 — LEVERAGE CAP. v13's qty = risk/dist exploded in low volatility
+//          (up to $94M notional; every trade above 5x leverage lost money).
+//          v14 caps notional at 3x equity and floors the sizing distance
+//          with long-run ATR so quiet markets can't inflate size.
+//  FIX 3 — R-CONSISTENT EXITS. v13 banked partials at less than 1R while
+//          stops cost a full 1R+ (avg loss $11.4k vs avg win $9.5k).
+//          v14 prices TP1/TP3 as R-multiples of the ACTUAL fill: TP1 >= 1R.
+//  FIX 4 — COSTS MODELED. v13 declared no commission/slippage (~$500k of
+//          unmodeled cost). v14 models both, so the backtest tells the truth.
+//  FIX 5 — DRAWDOWN GOVERNOR. v13's only brake reset at midnight; Mar-Jul
+//          bled -$521k at full size. v14 scales risk down as drawdown
+//          deepens, adds a monthly loss halt, and a hard equity stop that
+//          flattens and freezes the strategy at max drawdown.
+//  PLUS  — Spike filter: no entries on candles > 2.5x ATR (the 68 instant
+//          2-bar stop-outs cost -$1.46M); entry/R math synced to the real
+//          fill price instead of the signal bar's close.
+// ═══════════════════════════════════════════════════════════════════════════
+strategy("GMC Track B v14.0 — Sovereign Risk Engine", overlay=true,
+     initial_capital=1000000,
+     commission_type=strategy.commission.percent, commission_value=0.005,
+     slippage=3,
+     pyramiding=0,
+     calc_on_every_tick=false)
+
+//+------------------------------------------------------------------+
+// INPUTS — RISK ENGINE
+//+------------------------------------------------------------------+
+riskPercent      = input.float(0.75, title="Base Risk % per Trade", minval=0.1, maxval=5.0, tooltip="Institutional guidance (Thorp/Vince/prop-firm practice): 0.5-1.0%. Position size, not win rate, is the dominant lever on risk of ruin.", group="Risk Management")
+maxLeverage      = input.float(3.0,  title="Max Notional Leverage (x equity)", minval=0.5, maxval=10.0, tooltip="Hard cap on position value. Backtest evidence: every trade above 5x lost money.", group="Risk Management")
+minQty           = input.float(0.01, title="Minimum Quantity (oz) — skip trade if below", group="Risk Management")
+useRiskDecay     = input.bool(true,  title="Enable Consecutive Loss Risk Decay", group="Risk Management")
+useVolatilitySizing = input.bool(true, title="Enable ATR-Based Volatility Sizing", group="Risk Management")
+
+// Drawdown governor
+maxDailyLossPct   = input.float(3.0,  title="Daily Max Loss Limit (%)", group="Drawdown Governor")
+maxMonthlyLossPct = input.float(8.0,  title="Monthly Max Loss Limit (%)", group="Drawdown Governor")
+ddScaleStart      = input.float(5.0,  title="Cut risk 50% when drawdown exceeds (%)", group="Drawdown Governor")
+ddScaleDeep       = input.float(10.0, title="Cut risk 75% when drawdown exceeds (%)", group="Drawdown Governor")
+hardStopDDPct     = input.float(20.0, title="HARD STOP: flatten & halt at drawdown (%)", group="Drawdown Governor")
+
+//+------------------------------------------------------------------+
+// INPUTS — REGIME, TREND & ENTRY QUALITY (carried over from v13)
+//+------------------------------------------------------------------+
+useRegimeHarvesting = input.bool(true, title="Enable Dynamic Regime Harvesting", group="Regime Classifier Settings")
+regimeThreshold     = input.float(4.5, title="Sideways Boundary Threshold Ratio", minval=2.0, maxval=10.0, group="Regime Classifier Settings")
+
+emaTrendPeriod   = input.int(200, title="Native Trend Filter Period (H1 EMA Mimic)", group="Trend Settings")
+emaSignalPeriod  = input.int(20,  title="Signal Filter Period (M15 EMA)", group="Trend Settings")
+
+minDonchian      = input.int(10, title="Min Donchian Period", group="Adaptive Parameters")
+maxDonchian      = input.int(24, title="Max Donchian Period", group="Adaptive Parameters")
+
+minBodyPercent   = input.float(35.0, title="Min Candle Body %", minval=10.0, maxval=90.0, group="Candlestick Quality Filters")
+maxWickPercent   = input.float(45.0, title="Max Rejection Wick %", minval=10.0, maxval=90.0, group="Candlestick Quality Filters")
+maxCandleAtr     = input.float(2.5,  title="Max Signal Candle Range (x ATR) — spike filter", group="Candlestick Quality Filters")
+
+useVolumeFilter  = input.bool(true, title="Use Session-Adaptive Volume", group="Institutional Volume Filters")
+volSmaPeriod     = input.int(20,    title="Volume SMA Period", group="Institutional Volume Filters")
+volMultiplier    = input.float(1.1, title="Volume Multiplier", group="Institutional Volume Filters")
+
+useAdxFilter     = input.bool(true, title="Use ADX Chop Filter", tooltip="Kaminski & Lo (J. Financial Markets 2014): stops only add value in momentum regimes. This blocks entries when there is no trend to ride.", group="Execution Protections")
+adxMinLevel      = input.float(20.0, title="Min ADX to Trade", group="Execution Protections")
+maxDailyTrades   = input.int(4, title="Max Trades Per Day", group="Execution Protections")
+useSessionFilter = input.bool(true, title="Use Session Filter", group="Execution Protections")
+sessionTime      = input.string("0600-1900:23456", title="Allowed Trading Window (GMT)", group="Execution Protections")
+
+//+------------------------------------------------------------------+
+// INPUTS — EXITS (R-multiple based, FIX 3)
+//+------------------------------------------------------------------+
+atrPeriod        = input.int(14,    title="ATR Period", group="Exits")
+slAtrMultiplier  = input.float(2.0, title="Max Safety SL (ATR Multiplier)", group="Exits")
+slAtrFloor       = input.float(0.75,title="Min SL Distance (x ATR)", group="Exits")
+tp1RMult         = input.float(1.2, title="TP1 (R-multiple, trend regime)", minval=1.0, tooltip="Kept >= 1R so partials never pay less than a stop costs.", group="Exits")
+tp1RMultRange    = input.float(1.0, title="TP1 (R-multiple, range regime)", minval=0.8, group="Exits")
+tp3RMult         = input.float(3.0, title="Final Target (R-multiple, trend)", group="Exits")
+tp3RMultRange    = input.float(2.0, title="Final Target (R-multiple, range)", group="Exits")
+beTriggerR       = input.float(1.0, title="Break-Even Trigger (R-Multiple)", group="Trade Management")
+beBufferR        = input.float(0.1, title="Break-Even Buffer (R) — covers costs", group="Trade Management")
+partialClosePct  = input.float(50.0,title="Partial Close % @ TP1 (trend)", group="Trade Management")
+partialCloseRng  = input.float(75.0,title="Partial Close % @ TP1 (range)", group="Trade Management")
+trailAtrMult     = input.float(2.0, title="Trailing Distance after TP1 (x ATR)", group="Trade Management")
+timeStopBars     = input.int(18, title="Time Stop (bars) — exit stalled trades", tooltip="Breakouts that don't work quickly usually don't work. Exit at market if the trade hasn't reached +0.5R after this many bars.", group="Trade Management")
+timeStopMinR     = input.float(0.5, title="Time Stop Progress Threshold (R)", group="Trade Management")
+
+//+------------------------------------------------------------------+
+// CORE CALCULATIONS
+//+------------------------------------------------------------------+
+emaTrend  = ta.ema(close, emaTrendPeriod)
+emaSignal = ta.ema(close, emaSignalPeriod)
+atrVal    = ta.atr(atrPeriod)
+histAtr   = ta.atr(100)
+
+// Volatility risk scaler: high vol -> smaller size
+volRatio        = histAtr > 0 ? (atrVal / histAtr) : 1.0
+volSizingFactor = useVolatilitySizing ? (volRatio > 1.5 ? 0.50 : volRatio > 1.2 ? 0.75 : 1.0) : 1.0
+
+// Adaptive Donchian
+rawLookback      = maxDonchian - (volRatio * 8)
+cleanLookback    = math.max(minDonchian, math.min(maxDonchian, rawLookback))
+adaptiveLookback = math.max(1, int(nz(math.round(cleanLookback), maxDonchian)))
+donchianHigh     = ta.highest(high, adaptiveLookback)
+donchianLow      = ta.lowest(low, adaptiveLookback)
+
+inSession = not useSessionFilter or not na(time(timeframe.period, sessionTime, "GMT"))
+
+// Regime classifier
+channelWidthRatio = atrVal > 0 ? ((donchianHigh - donchianLow) / atrVal) : 10.0
+isSidewaysRegime  = useRegimeHarvesting and (channelWidthRatio < regimeThreshold)
+
+activeTp1R    = isSidewaysRegime ? tp1RMultRange : tp1RMult
+activeTp3R    = isSidewaysRegime ? tp3RMultRange : tp3RMult
+activePartial = isSidewaysRegime ? partialCloseRng : partialClosePct
+
+//+------------------------------------------------------------------+
+// DRAWDOWN GOVERNOR & ACCOUNT PROTECTION  (FIX 5)
+//+------------------------------------------------------------------+
+var float startOfDayEquity   = na
+var float startOfMonthEquity = na
+var float peakEquity         = strategy.initial_capital
+var int   tradesToday        = 0
+var bool  halted             = false
+
+if ta.change(time("D"))
+    startOfDayEquity := strategy.equity
+    tradesToday := 0
+if ta.change(time("M"))
+    startOfMonthEquity := strategy.equity
+
+if (strategy.position_size[1] == 0 and strategy.position_size != 0)
+    tradesToday := tradesToday + 1
+
+peakEquity := math.max(peakEquity, strategy.equity)
+drawdownPct = (peakEquity - strategy.equity) / peakEquity * 100.0
+
+// Risk scales DOWN as drawdown deepens — the anti-death-spiral
+ddRiskScale = drawdownPct >= ddScaleDeep ? 0.25 : drawdownPct >= ddScaleStart ? 0.50 : 1.0
+
+currentDailyLossPct   = na(startOfDayEquity)   ? 0.0 : ((startOfDayEquity - strategy.equity) / startOfDayEquity) * 100.0
+currentMonthlyLossPct = na(startOfMonthEquity) ? 0.0 : ((startOfMonthEquity - strategy.equity) / startOfMonthEquity) * 100.0
+dailyLossOk   = currentDailyLossPct < maxDailyLossPct
+monthlyLossOk = currentMonthlyLossPct < maxMonthlyLossPct
+underDailyLimit = (tradesToday < maxDailyTrades) and dailyLossOk and monthlyLossOk
+
+// Hard equity stop: flatten everything and freeze the strategy
+if (not halted and drawdownPct >= hardStopDDPct)
+    halted := true
+if halted
+    strategy.cancel_all()
+    strategy.close_all(comment="HARD STOP — max drawdown")
+
+// Consecutive losses
+var int consecutiveLosses = 0
+if (ta.change(strategy.closedtrades))
+    if (strategy.closedtrades.profit(strategy.closedtrades - 1) < 0)
+        consecutiveLosses := consecutiveLosses + 1
+    else
+        consecutiveLosses := 0
+
+//+------------------------------------------------------------------+
+// CANDLESTICK QUALITY FILTERS (v13 + spike filter)
+//+------------------------------------------------------------------+
+candleRange = high - low
+candleBody  = math.abs(close - open)
+bodyRatio   = candleRange > 0 ? (candleBody / candleRange) * 100.0 : 0.0
+upperWick   = high - math.max(open, close)
+lowerWick   = math.min(open, close) - low
+upperWickRatio = candleRange > 0 ? (upperWick / candleRange) * 100.0 : 0.0
+lowerWickRatio = candleRange > 0 ? (lowerWick / candleRange) * 100.0 : 0.0
+
+candleIsSolid    = bodyRatio >= minBodyPercent
+noUpperRejection = upperWickRatio <= maxWickPercent
+noLowerRejection = lowerWickRatio <= maxWickPercent
+notASpike        = candleRange <= atrVal * maxCandleAtr   // blocks the 2-bar instant stop-outs
+
+volSma   = ta.sma(volume, volSmaPeriod)
+volumeOk = not useVolumeFilter or (volume > (volSma * volMultiplier))
+
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+adxOk = not useAdxFilter or adxVal >= adxMinLevel
+
+//+------------------------------------------------------------------+
+// ENGINE TRIGGERS (v13 logic, evaluated on the just-closed bar)
+//+------------------------------------------------------------------+
+longTrendOk  = close > emaTrend and close > emaSignal
+shortTrendOk = close < emaTrend and close < emaSignal
+
+longBreakout  = longTrendOk  and close > donchianHigh[1] and candleIsSolid and noUpperRejection and volumeOk and notASpike
+shortBreakout = shortTrendOk and close < donchianLow[1]  and candleIsSolid and noLowerRejection and volumeOk and notASpike
+
+longPullback  = longTrendOk  and low <= emaSignal  and close > open and close > high[1] and candleIsSolid and noUpperRejection and notASpike
+shortPullback = shortTrendOk and high >= emaSignal and close < open and close < low[1]  and candleIsSolid and noLowerRejection and notASpike
+
+longTrigger  = (strategy.position_size == 0) and not halted and (longBreakout  or longPullback)  and inSession and underDailyLimit and adxOk
+shortTrigger = (strategy.position_size == 0) and not halted and (shortBreakout or shortPullback) and inSession and underDailyLimit and adxOk
+
+//+------------------------------------------------------------------+
+// POSITION SIZING ENGINE  (FIX 2)
+//+------------------------------------------------------------------+
+adjustedRisk = riskPercent * ddRiskScale * volSizingFactor
+if (useRiskDecay and consecutiveLosses > 0)
+    adjustedRisk := adjustedRisk / math.pow(1.5, consecutiveLosses)
+
+// Structural stop, clamped between an ATR floor and the safety ceiling
+recentLow  = ta.lowest(low, 10)
+recentHigh = ta.highest(high, 10)
+longSlDistance   = math.min(close - recentLow,  atrVal * slAtrMultiplier)
+shortSlDistance  = math.min(recentHigh - close, atrVal * slAtrMultiplier)
+finalLongSLDist  = math.max(longSlDistance,  atrVal * slAtrFloor)
+finalShortSLDist = math.max(shortSlDistance, atrVal * slAtrFloor)
+
+// Sizing distance is floored by LONG-RUN ATR so a quiet market can't
+// shrink the divisor and explode the position (the v13 killer)
+sizingFloor    = histAtr * 0.6
+sizeDistLong   = math.max(finalLongSLDist,  sizingFloor)
+sizeDistShort  = math.max(finalShortSLDist, sizingFloor)
+
+calcQty(dist) =>
+    riskCash = strategy.equity * (adjustedRisk / 100.0)
+    rawQty   = dist > 0 ? riskCash / dist : 0.0
+    capQty   = (strategy.equity * maxLeverage) / close   // FIX 2: hard notional cap
+    math.floor(math.min(rawQty, capQty) * 100) / 100
+
+qtyLong  = calcQty(sizeDistLong)
+qtyShort = calcQty(sizeDistShort)
+
+//+------------------------------------------------------------------+
+// TRADE EXECUTION — entry orders + planned stop distance
+//+------------------------------------------------------------------+
+var float plannedDist = na
+var float entryPrice  = na
+var float currentSL   = na
+var float riskR       = na
+var float tp1         = na
+var float tp3         = na
+var float initialQty  = na
+var float lockedPartial = na
+var float lockedTp1R  = na
+var float lockedTp3R  = na
+var bool  tp1Hit          = false
+var bool  breakEvenActive = false
+var int   entryBar        = na
+
+if (strategy.position_size == 0)
+    entryPrice := na
+    currentSL := na
+    riskR := na
+    tp1 := na
+    tp3 := na
+    initialQty := na
+    entryBar := na
+    tp1Hit := false
+    breakEvenActive := false
+
+if (longTrigger and qtyLong >= minQty)
+    plannedDist := finalLongSLDist
+    lockedPartial := activePartial
+    lockedTp1R := activeTp1R
+    lockedTp3R := activeTp3R
+    strategy.entry("GMC LONG", strategy.long, qty=qtyLong, comment=isSidewaysRegime ? "GMC LONG (Range)" : "GMC LONG (Trend)")
+
+if (shortTrigger and qtyShort >= minQty)
+    plannedDist := finalShortSLDist
+    lockedPartial := activePartial
+    lockedTp1R := activeTp1R
+    lockedTp3R := activeTp3R
+    strategy.entry("GMC SHORT", strategy.short, qty=qtyShort, comment=isSidewaysRegime ? "GMC SHORT (Range)" : "GMC SHORT (Trend)")
+
+// Sync all R-math to the ACTUAL fill price (v13 used the signal bar close)
+if (strategy.position_size != 0 and strategy.position_size[1] == 0 and not na(plannedDist))
+    entryPrice := strategy.position_avg_price
+    riskR      := plannedDist
+    initialQty := math.abs(strategy.position_size)
+    entryBar   := bar_index
+    if strategy.position_size > 0
+        currentSL := entryPrice - riskR
+        tp1       := entryPrice + riskR * lockedTp1R
+        tp3       := entryPrice + riskR * lockedTp3R
+    else
+        currentSL := entryPrice + riskR
+        tp1       := entryPrice - riskR * lockedTp1R
+        tp3       := entryPrice - riskR * lockedTp3R
+
+//+------------------------------------------------------------------+
+// EXIT ENGINE — real intrabar stop/limit orders  (FIX 1 + FIX 3)
+//+------------------------------------------------------------------+
+if (strategy.position_size != 0 and not na(entryPrice) and not na(riskR))
+    isLong = strategy.position_size > 0
+
+    // Detect the TP1 partial fill -> lock stop at breakeven + cost buffer
+    if (not tp1Hit and math.abs(strategy.position_size) < initialQty - 0.001)
+        tp1Hit := true
+        breakEvenActive := true
+        currentSL := isLong ? math.max(currentSL, entryPrice + riskR * beBufferR) : math.min(currentSL, entryPrice - riskR * beBufferR)
+
+    // Pre-TP1 break-even trigger (intrabar excursion, not close)
+    if (not breakEvenActive)
+        beReached = isLong ? (high >= entryPrice + riskR * beTriggerR) : (low <= entryPrice - riskR * beTriggerR)
+        if beReached
+            currentSL := isLong ? math.max(currentSL, entryPrice) : math.min(currentSL, entryPrice)
+            breakEvenActive := true
+
+    // Post-TP1 ratcheting ATR trail (never loosens)
+    if (tp1Hit)
+        currentSL := isLong ? math.max(currentSL, close - atrVal * trailAtrMult) : math.min(currentSL, close + atrVal * trailAtrMult)
+
+    // Time stop: breakouts that stall never pay for their risk — cut them
+    stalled = not tp1Hit and not na(entryBar) and (bar_index - entryBar) >= timeStopBars and (isLong ? close - entryPrice : entryPrice - close) < riskR * timeStopMinR
+    if (stalled)
+        strategy.close(isLong ? "GMC LONG" : "GMC SHORT", comment="Time Stop")
+
+    // REAL orders: stops fill intrabar at the stop price, limits at target
+    if isLong
+        if (not tp1Hit)
+            strategy.exit("TP1", from_entry="GMC LONG", qty_percent=lockedPartial, limit=tp1, stop=currentSL, comment_profit="TP1 Sweep", comment_loss="Stop Loss Hit")
+        strategy.exit("RUN", from_entry="GMC LONG", qty_percent=100, limit=tp3, stop=currentSL, comment_profit="TP3 Harvest", comment_loss=tp1Hit ? "Trail Stop" : "Stop Loss Hit")
+    else
+        if (not tp1Hit)
+            strategy.exit("TP1", from_entry="GMC SHORT", qty_percent=lockedPartial, limit=tp1, stop=currentSL, comment_profit="TP1 Sweep", comment_loss="Stop Loss Hit")
+        strategy.exit("RUN", from_entry="GMC SHORT", qty_percent=100, limit=tp3, stop=currentSL, comment_profit="TP3 Harvest", comment_loss=tp1Hit ? "Trail Stop" : "Stop Loss Hit")
+
+//+------------------------------------------------------------------+
+// VISUALS
+//+------------------------------------------------------------------+
+plot(strategy.position_size != 0 ? currentSL : na, color=color.red,   style=plot.style_linebr, linewidth=2, title="Active Stop Loss")
+plot(strategy.position_size != 0 ? tp1 : na,       color=color.blue,  style=plot.style_linebr, title="Take Profit 1")
+plot(strategy.position_size != 0 ? tp3 : na,       color=color.green, style=plot.style_linebr, title="Active Target 3")
+plot(emaTrend,  color=color.orange, title="Trend EMA")
+plot(emaSignal, color=color.aqua,   title="Signal EMA")
+bgcolor(isSidewaysRegime ? color.new(color.blue, 96) : na, title="Sideways Regime Zone")
+bgcolor(halted ? color.new(color.red, 88) : na, title="HARD STOP — strategy halted")
