@@ -1,0 +1,200 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+//  G MONEY CORE — TRACK B v4.0 (Risk-Fixed)
+//
+//  Apply to: OANDA:XAUUSD, 5-minute chart (or higher). NOT 1-minute.
+//
+//  Why v3.32 blew up (from the 1,383-trade export):
+//    1. Lot clamps (min 0.01 / max 0.20) overrode the risk% math — every trade
+//       went out at 0.5–1.0 oz on a £100 account, so each stop-out cost ~5% of
+//       the account instead of 1.5%, and size never shrank as equity fell.
+//    2. The 70-pip minimum SL forced stops far wider than a 1-min signal can
+//       earn back; 62% of positions took the full 1R loss.
+//    3. The 0.45R trailing distance strangled runners — 238 of 384 TP1 trades
+//       exited at exactly breakeven, so winners never paid for the losers
+//       (profit factor 0.965).
+//    4. Nothing stopped the bleed: the tester kept trading past £0, which is
+//       how "366% drawdown" happened.
+//
+//  v4.0 fixes:
+//    • True risk-based sizing from CURRENT equity; if the broker minimum
+//      quantity would risk more than allowed, the trade is SKIPPED — never
+//      force-oversized. Notional is also capped by a leverage limit.
+//    • Pure ATR stop (no pip clamps), designed for the 5-minute chart.
+//    • TP1 = 1R for 50%, stop to breakeven+buffer, then a LOOSE 1.2×ATR trail
+//      that only starts at 1.5R — runners get room to actually run.
+//    • Hard equity stop: strategy halts permanently if equity drops a set %
+//      from its peak. Daily loss limit, consecutive-loss cooldown, and a
+//      max-trades-per-day cap kill the churn.
+//    • ADX chop filter + HTF trend-slope filter + over-extension filter so it
+//      stops buying spike tops (the worst losses in the export).
+// ─────────────────────────────────────────────────────────────────────────────
+strategy("GMC Track B v4.0 — Risk-Fixed",
+     shorttitle = "GMC v4.0",
+     overlay = true,
+     initial_capital = 100,
+     currency = currency.GBP,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.005,
+     slippage = 3,
+     margin_long = 5.0,
+     margin_short = 5.0,
+     calc_on_every_tick = false)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpRisk = "Risk & Sizing"
+riskPct       = input.float(1.0,  "Risk % of equity per trade",            minval = 0.1, step = 0.1, group = grpRisk)
+minQty        = input.float(0.01, "Broker minimum quantity (oz)",          minval = 0.001, step = 0.01, group = grpRisk)
+qtyStep       = input.float(0.01, "Quantity step (oz)",                    minval = 0.001, step = 0.01, group = grpRisk)
+maxLeverage   = input.float(5.0,  "Max notional leverage (× equity)",      minval = 1.0, group = grpRisk)
+maxTotalDDPct = input.float(25.0, "HARD STOP: max % drawdown from peak",   minval = 5.0, group = grpRisk)
+
+grpSig = "Trend & Signal"
+trendTF    = input.timeframe("15", "Trend timeframe",                      group = grpSig)
+trendLen   = input.int(50,    "Trend EMA length",                          group = grpSig)
+sigLen     = input.int(20,    "Signal EMA length (chart TF)",              group = grpSig)
+adxLen     = input.int(14,    "ADX length",                                group = grpSig)
+adxMin     = input.float(20.0,"Min ADX (chop filter)",                     group = grpSig)
+bodyMinPct = input.float(60.0,"Min candle body % of range",                group = grpSig)
+maxExtAtr  = input.float(2.0, "Max distance from signal EMA (×ATR)",       group = grpSig)
+
+grpExit = "Stops & Targets"
+atrLen       = input.int(14,    "ATR length",                              group = grpExit)
+slAtrMult    = input.float(1.5, "Stop loss (×ATR)",                        group = grpExit)
+tp1RMult     = input.float(1.0, "TP1 (R multiple)",                        group = grpExit)
+tp1Pct       = input.float(50.0,"Partial close % at TP1",                  group = grpExit)
+beBufferR    = input.float(0.1, "Breakeven buffer (R)",                    group = grpExit)
+trailStartR  = input.float(1.5, "Trailing starts at (R)",                  group = grpExit)
+trailAtrMult = input.float(1.2, "Trailing distance (×ATR)",                group = grpExit)
+tpFinalR     = input.float(3.0, "Final target (R)",                        group = grpExit)
+
+grpProt = "Session & Protection"
+sessStr         = input.session("1000-2200", "Trading session",            group = grpProt)
+sessTz          = input.string("GMT+3", "Session timezone",                group = grpProt)
+dailyMaxLossPct = input.float(4.0, "Daily max loss % (of day-start equity)", group = grpProt)
+maxConsecLosses = input.int(3,     "Max consecutive losses",               group = grpProt)
+cooldownMins    = input.int(60,    "Cooldown after loss streak (minutes)", group = grpProt)
+maxTradesPerDay = input.int(5,     "Max trades per day",                   group = grpProt)
+
+// ── Indicators ───────────────────────────────────────────────────────────────
+atr      = ta.atr(atrLen)
+emaSig   = ta.ema(close, sigLen)
+emaTrend = request.security(syminfo.tickerid, trendTF, ta.ema(close, trendLen), lookahead = barmerge.lookahead_off)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+inSession = not na(time(timeframe.period, sessStr, sessTz))
+
+// ── Account-protection state ─────────────────────────────────────────────────
+var float dayStartEquity = na
+var int   tradesToday    = 0
+var int   lossStreak     = 0
+var int   cooldownUntil  = 0
+var bool  halted         = false
+var float eqPeak         = strategy.initial_capital
+
+if na(dayStartEquity) or ta.change(time("D")) != 0
+    dayStartEquity := strategy.equity
+    tradesToday    := 0
+
+// Track closed trades → consecutive-loss cooldown
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastPnL < 0
+        lossStreak += 1
+        if lossStreak >= maxConsecLosses
+            cooldownUntil := time + cooldownMins * 60 * 1000
+            lossStreak    := 0
+    else if lastPnL > 0
+        lossStreak := 0
+
+// Hard equity stop — halts the strategy permanently
+eqPeak := math.max(eqPeak, strategy.equity)
+if not halted and strategy.equity <= eqPeak * (1.0 - maxTotalDDPct / 100.0)
+    halted := true
+if halted
+    strategy.cancel_all()
+    strategy.close_all(comment = "HARD STOP")
+
+dailyOK    = strategy.equity > dayStartEquity * (1.0 - dailyMaxLossPct / 100.0)
+cooldownOK = time >= cooldownUntil
+
+// ── Position sizing: risk-first, never force-oversized ───────────────────────
+calcQty(float slDist) =>
+    riskCash = strategy.equity * riskPct / 100.0
+    rawQty   = slDist > 0 ? riskCash / slDist : 0.0
+    q        = math.floor(rawQty / qtyStep) * qtyStep
+    maxQ     = math.floor(strategy.equity * maxLeverage / close / qtyStep) * qtyStep
+    math.min(q, maxQ)
+
+// ── Per-trade state ──────────────────────────────────────────────────────────
+var float entryPx  = na
+var float slPx     = na
+var float rVal     = na
+var float qtyInit  = na
+var bool  tp1Done  = false
+
+if strategy.position_size == 0
+    entryPx := na
+    slPx    := na
+    qtyInit := na
+    tp1Done := false
+
+// Sync to the actual fill price when a position opens
+if strategy.position_size != 0 and strategy.position_size[1] == 0 and not na(rVal)
+    entryPx := strategy.position_avg_price
+    slPx    := strategy.position_size > 0 ? entryPx - rVal : entryPx + rVal
+    qtyInit := math.abs(strategy.position_size)
+
+// ── Entry logic ──────────────────────────────────────────────────────────────
+rng     = high - low
+bodyOK  = rng > 0 and math.abs(close - open) / rng * 100.0 >= bodyMinPct
+adxOK   = adxVal >= adxMin
+trendUp = close > emaTrend and emaTrend > emaTrend[4]
+trendDn = close < emaTrend and emaTrend < emaTrend[4]
+
+longSig  = trendUp and close > emaSig and close > high[1] and bodyOK and adxOK and (close - emaSig) <= maxExtAtr * atr
+shortSig = trendDn and close < emaSig and close < low[1]  and bodyOK and adxOK and (emaSig - close) <= maxExtAtr * atr
+
+canTrade = not halted and inSession and dailyOK and cooldownOK and tradesToday < maxTradesPerDay and strategy.position_size == 0
+
+if canTrade and (longSig or shortSig)
+    slDist = atr * slAtrMult
+    qty    = calcQty(slDist)
+    // If even the broker minimum would over-risk the account, SKIP — no min-lot forcing
+    if qty >= minQty
+        rVal := slDist
+        if longSig
+            strategy.entry("L", strategy.long, qty = qty, comment = "GMC LONG")
+        else
+            strategy.entry("S", strategy.short, qty = qty, comment = "GMC SHORT")
+        tradesToday += 1
+
+// ── Trade management: one partial, BE+buffer, loose ATR trail ────────────────
+if strategy.position_size != 0 and not na(entryPx) and not na(rVal)
+    isLong = strategy.position_size > 0
+    // Detect the TP1 partial fill → lock stop at breakeven + buffer
+    if not tp1Done and math.abs(strategy.position_size) < qtyInit - qtyStep / 2.0
+        tp1Done := true
+        slPx    := isLong ? math.max(slPx, entryPx + beBufferR * rVal) : math.min(slPx, entryPx - beBufferR * rVal)
+    // Ratcheting ATR trail once the runner is 1.5R in profit
+    trailArmed = isLong ? high >= entryPx + trailStartR * rVal : low <= entryPx - trailStartR * rVal
+    if tp1Done and trailArmed
+        slPx := isLong ? math.max(slPx, close - trailAtrMult * atr) : math.min(slPx, close + trailAtrMult * atr)
+
+    if isLong
+        if not tp1Done
+            strategy.exit("TP1", from_entry = "L", qty_percent = tp1Pct, limit = entryPx + tp1RMult * rVal, stop = slPx, comment_profit = "TP1 PARTIAL", comment_loss = "SL")
+        strategy.exit("RUN", from_entry = "L", qty_percent = 100, limit = entryPx + tpFinalR * rVal, stop = slPx, comment_profit = "TP FINAL", comment_loss = tp1Done ? "TRAIL/BE" : "SL")
+    else
+        if not tp1Done
+            strategy.exit("TP1", from_entry = "S", qty_percent = tp1Pct, limit = entryPx - tp1RMult * rVal, stop = slPx, comment_profit = "TP1 PARTIAL", comment_loss = "SL")
+        strategy.exit("RUN", from_entry = "S", qty_percent = 100, limit = entryPx - tpFinalR * rVal, stop = slPx, comment_profit = "TP FINAL", comment_loss = tp1Done ? "TRAIL/BE" : "SL")
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+plot(emaSig,   "Signal EMA",      color = color.aqua)
+plot(emaTrend, "Trend EMA (HTF)", color = color.orange, linewidth = 2)
+plot(strategy.position_size != 0 ? slPx : na, "Stop", style = plot.style_linebr, color = color.red)
+bgcolor(halted ? color.new(color.red, 85) : not inSession ? color.new(color.gray, 95) : na)
+
+if barstate.islastconfirmedhistory and timeframe.in_seconds() < 300
+    label.new(bar_index, high, "⚠ GMC v4.0 is designed for the 5-minute chart or higher.\nOn 1-minute charts the ATR stop cannot cover trading costs.", style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white)
