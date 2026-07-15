@@ -1,0 +1,396 @@
+//@version=5
+// ============================================================
+// G MONEY CORE v9.2 - COMPILED EDITION
+// Fixes over v9.1 (which had 4 compile errors + stale filters):
+//  1. strategy() is now the FIRST statement (inputs moved below it)
+//  2. calc_on_every_tick hardcoded false — Pine requires a const
+//     bool; an input can never be const. Backtests must be
+//     bar-close anyway; alerts still fire correctly.
+//  3. syminfo.spread does not exist in Pine — TradingView has no
+//     spread data. Filter removed; real costs are now modeled via
+//     commission + slippage in the declaration, and spread control
+//     belongs in the MT5 EA that receives the webhook.
+//  4. Volatility filter was "90 pips per 15 bars" — a $9 range
+//     over 2.5 days of H4 gold, i.e. permanently blocked. Now
+//     ATR-relative so it scales with the market.
+//  5. Prime-hours windows (0700-0900 etc.) contain zero H4 bar
+//     opens — prime filter now auto-bypasses on H4+ timeframes.
+//  6. Position sizing gains a hard notional leverage cap and a
+//     long-run ATR floor (the uncapped risk/dist division is what
+//     blew up Track B v13: every trade above 5x leverage lost).
+//  7. Drawdown governor: risk taper by drawdown depth, monthly
+//     loss halt, hard flatten-and-freeze equity stop.
+// ============================================================
+strategy("G MONEY CORE v9.2 - COMPILED EDITION", overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.005,
+     slippage=3,
+     max_labels_count=500,
+     calc_on_every_tick=false)
+
+// ============================================================
+// INPUTS
+// ============================================================
+var string G0 = "Capital Allocation"
+risk_percent     = input.float(1.0, title="True Risk % Per Trade", minval=0.1, maxval=10.0, group=G0)
+daily_loss_limit = input.float(3.0, title="Daily Loss Limit %", minval=0.5, maxval=10.0, group=G0)
+max_leverage     = input.float(3.0, title="Max Notional Leverage (x equity)", minval=0.5, maxval=10.0, group=G0)
+min_qty          = input.float(0.01, title="Minimum Quantity — skip trade if below", group=G0)
+
+var string GDD = "Drawdown Governor"
+monthly_loss_limit = input.float(8.0,  title="Monthly Loss Limit %", group=GDD)
+dd_scale_start     = input.float(5.0,  title="Cut risk 50% at drawdown %", group=GDD)
+dd_scale_deep      = input.float(10.0, title="Cut risk 75% at drawdown %", group=GDD)
+hard_stop_dd       = input.float(20.0, title="HARD STOP: flatten & halt at drawdown %", group=GDD)
+
+var string G1 = "Core Filters"
+ma_period       = input.int(50,    title="Trend MA Period", group=G1)
+rsi_period      = input.int(14,    title="RSI Period", group=G1)
+vol_period      = input.int(20,    title="Volume MA Period", group=G1)
+vol_mult        = input.float(1.8, title="Volume Surge Multiplier", group=G1)
+wick_threshold  = input.float(62.0,title="Min Rejection Wick %", group=G1)
+body_threshold  = input.float(33.0,title="Max Candle Body %", group=G1)
+vola_atr_mult   = input.float(6.0, title="Max 15-Bar Range (x ATR)", tooltip="Replaces the old 90-pip cap, which was a $9 limit on 2.5 days of H4 gold — permanently blocked. ATR-relative scales with the market.", group=G1)
+atr_sl_mult     = input.float(1.8, title="ATR SL Multiplier", group=G1)
+atr_trail_mult  = input.float(3.2, title="ATR Trail Multiplier", group=G1)
+
+var string G2 = "Win Rate Control"
+use_buffer         = input.bool(true, title="MA Buffer Zone?", group=G2)
+filter_small_wicks = input.bool(true, title="Filter Small Wicks?", group=G2)
+min_score          = input.int(6,    title="Min Score 6 = Perfect Only", group=G2)
+cooldown_bars      = input.int(12,   title="Cooldown Bars Main", group=G2)
+use_confirm_bar    = input.bool(true, title="Require Confirmation Bar?", group=G2)
+
+var string G3 = "Session Prime Hours"
+use_prime_hours  = input.bool(true,           title="Prime Hours Only? (auto-off on H4+)", group=G3)
+london_prime     = input.session("0700-0900", title="London Prime UTC", group=G3)
+ny_prime         = input.session("1300-1500", title="NY Prime UTC", group=G3)
+use_full_session = input.bool(true,           title="Also Allow Full Session?", group=G3)
+london_full      = input.session("0700-1600", title="London Full Session", group=G3)
+ny_full          = input.session("1300-2100", title="NY Full Session", group=G3)
+
+var string G4 = "Exit Management"
+use_trailing = input.bool(true,  title="Enable Trailing Stop?", group=G4)
+be_trigger   = input.float(1.2,  title="Breakeven Trigger x SL", group=G4)
+be_premium   = input.float(0.2,  title="Breakeven Premium x ATR", group=G4)
+
+var string G5 = "Higher Timeframe"
+use_h4_gate = input.bool(true, title="Use H4 Bias Gate?", group=G5)
+
+var string G6 = "Cascade System"
+use_cascade      = input.bool(true,  title="Enable Cascade?", group=G6)
+cascade_pip_1    = input.float(20.0, title="Tier 1 Pips", group=G6)
+cascade_pip_2    = input.float(30.0, title="Tier 2 Pips", group=G6)
+cascade_pip_3    = input.float(50.0, title="Tier 3 Pips", group=G6)
+cascade_bars     = input.int(4,      title="Bars to Measure", group=G6)
+cascade_vol      = input.float(2.0,  title="Cascade Volume Min", group=G6)
+cascade_cooldown = input.int(6,      title="Cascade Cooldown", group=G6)
+
+// ============================================================
+// SESSION — prime hours auto-bypass on H4 and above, because
+// 2-hour session windows contain zero H4 bar opens
+// ============================================================
+is_h4_or_higher = timeframe.in_seconds() >= 14400
+in_london_prime = not na(time(timeframe.period, london_prime))
+in_ny_prime     = not na(time(timeframe.period, ny_prime))
+in_prime_hours  = in_london_prime or in_ny_prime
+in_london_full  = not na(time(timeframe.period, london_full))
+in_ny_full      = not na(time(timeframe.period, ny_full))
+in_full_session = in_london_full or in_ny_full
+prime_active    = use_prime_hours and not is_h4_or_higher
+in_session      = prime_active ? in_prime_hours : (use_full_session ? in_full_session : true)
+
+// ============================================================
+// DAILY LOSS LIMIT + DRAWDOWN GOVERNOR
+// ============================================================
+var float day_start_equity   = strategy.equity
+var float month_start_equity = strategy.equity
+var float peak_equity        = strategy.initial_capital
+var bool  daily_limit_hit    = false
+var bool  halted             = false
+
+if ta.change(time("D"))
+    day_start_equity := strategy.equity
+    daily_limit_hit  := false
+if ta.change(time("M"))
+    month_start_equity := strategy.equity
+
+daily_loss_used  = day_start_equity - strategy.equity
+daily_limit_hit := daily_loss_used >= (day_start_equity * daily_loss_limit / 100)
+monthly_limit_hit = (month_start_equity - strategy.equity) >= (month_start_equity * monthly_loss_limit / 100)
+
+peak_equity := math.max(peak_equity, strategy.equity)
+drawdown_pct = (peak_equity - strategy.equity) / peak_equity * 100.0
+dd_risk_scale = drawdown_pct >= dd_scale_deep ? 0.25 : drawdown_pct >= dd_scale_start ? 0.50 : 1.0
+
+if not halted and drawdown_pct >= hard_stop_dd
+    halted := true
+if halted
+    strategy.cancel_all()
+    strategy.close_all(comment="HARD STOP — max drawdown")
+
+trading_allowed = not daily_limit_hit and not monthly_limit_hit and not halted
+
+// ============================================================
+// H4 BIAS
+// ============================================================
+h4_close      = request.security(syminfo.tickerid, "240", close,             lookahead=barmerge.lookahead_off)
+h4_ma50       = request.security(syminfo.tickerid, "240", ta.sma(close, 50), lookahead=barmerge.lookahead_off)
+h4_ma50_prev  = request.security(syminfo.tickerid, "240", ta.sma(close, 50)[3], lookahead=barmerge.lookahead_off)
+h4_slope_up   = h4_ma50 > h4_ma50_prev
+h4_slope_down = h4_ma50 < h4_ma50_prev
+bool h4_bull  = use_h4_gate ? (h4_close > h4_ma50 and h4_slope_up)   : true
+bool h4_bear  = use_h4_gate ? (h4_close < h4_ma50 and h4_slope_down) : true
+
+// ============================================================
+// CORE CALCULATIONS
+// ============================================================
+pip_mult = syminfo.mintick * 10
+atr_val  = ta.atr(14)
+hist_atr = ta.atr(100)
+ma_buf   = use_buffer ? (atr_val * 0.35) : 0.0
+ma50     = ta.sma(close, ma_period)
+
+plot(ma50, color=color.new(color.blue, 50), title="MA50", linewidth=1)
+
+bool trend_buy  = close > (ma50 + ma_buf)
+bool trend_sell = close < (ma50 - ma_buf)
+
+bool trend_buy_stable  = ta.lowest(trend_buy  ? 1 : 0, 5) > 0
+bool trend_sell_stable = ta.lowest(trend_sell ? 1 : 0, 5) > 0
+
+ma50_slope_up   = ma50 > ma50[12]
+ma50_slope_down = ma50 < ma50[12]
+
+candle_range = high - low
+lower_wick   = math.min(open, close) - low
+upper_wick   = high - math.max(open, close)
+body_size    = math.abs(open - close)
+avg_candle   = ta.sma(candle_range, 5)
+size_ok      = filter_small_wicks ? (candle_range > avg_candle * 0.75) : true
+
+bool bull_rej = candle_range > 0 and (lower_wick / candle_range * 100 >= wick_threshold) and (body_size / candle_range * 100 <= body_threshold) and size_ok
+bool bear_rej = candle_range > 0 and (upper_wick / candle_range * 100 >= wick_threshold) and (body_size / candle_range * 100 <= body_threshold) and size_ok
+
+avg_vol       = ta.sma(volume, vol_period)
+vol_confirmed = volume >= (avg_vol * vol_mult)
+
+rsi_val        = ta.rsi(close, rsi_period)
+rsi_bull_valid = h4_bull ? (rsi_val >= 45 and rsi_val <= 75) : (rsi_val >= 40 and rsi_val <= 60)
+rsi_bear_valid = h4_bear ? (rsi_val >= 25 and rsi_val <= 55) : (rsi_val >= 40 and rsi_val <= 60)
+
+// ATR-relative volatility guard (was a fixed 90-pip cap = always blocked)
+highest_15 = ta.highest(high, 15)
+lowest_15  = ta.lowest(low, 15)
+vola_ok    = (highest_15 - lowest_15) <= vola_atr_mult * atr_val
+
+// ============================================================
+// CONFLUENCE SCORES
+// ============================================================
+int bull_score = 0
+bull_score := bull_score + (trend_buy_stable ? 1 : 0)
+bull_score := bull_score + (bull_rej         ? 1 : 0)
+bull_score := bull_score + (vol_confirmed    ? 1 : 0)
+bull_score := bull_score + (rsi_bull_valid   ? 1 : 0)
+bull_score := bull_score + (ma50_slope_up    ? 1 : 0)
+bull_score := bull_score + (h4_bull          ? 1 : 0)
+
+int bear_score = 0
+bear_score := bear_score + (trend_sell_stable ? 1 : 0)
+bear_score := bear_score + (bear_rej          ? 1 : 0)
+bear_score := bear_score + (vol_confirmed     ? 1 : 0)
+bear_score := bear_score + (rsi_bear_valid    ? 1 : 0)
+bear_score := bear_score + (ma50_slope_down   ? 1 : 0)
+bear_score := bear_score + (h4_bear           ? 1 : 0)
+
+bool bull_perfect = bull_score >= min_score
+bool bear_perfect = bear_score >= min_score
+
+// CONFIRMATION BAR
+bool bull_confirmed = use_confirm_bar ? (close > open and close[1] > open[1]) : true
+bool bear_confirmed = use_confirm_bar ? (close < open and close[1] < open[1]) : true
+
+// ============================================================
+// COOLDOWNS
+// ============================================================
+var int bars_since = 999
+bars_since := bars_since + 1
+if strategy.closedtrades > strategy.closedtrades[1]
+    bars_since := 0
+cooldown_ok = bars_since >= cooldown_bars
+
+var int casc_bars = 999
+casc_bars := casc_bars + 1
+if strategy.closedtrades > strategy.closedtrades[1]
+    casc_bars := 0
+casc_cool_ok = casc_bars >= cascade_cooldown
+
+// ============================================================
+// SIGNALS
+// ============================================================
+bool buy_signal  = bull_perfect and bull_confirmed and vola_ok and in_session and cooldown_ok and trading_allowed
+bool sell_signal = bear_perfect and bear_confirmed and vola_ok and in_session and cooldown_ok and trading_allowed
+
+// CASCADE
+pip_move_down = (ta.highest(high, cascade_bars) - close) / pip_mult
+pip_move_up   = (close - ta.lowest(low, cascade_bars))   / pip_mult
+
+casc_vol_ok   = volume >= (avg_vol * cascade_vol)
+casc_rsi_sell = rsi_val < 50
+casc_rsi_buy  = rsi_val > 50
+casc_size_ok  = candle_range > avg_candle * 1.2
+
+bool casc_sell_t1 = use_cascade and pip_move_down >= cascade_pip_1 and pip_move_down < cascade_pip_2 and casc_vol_ok and h4_bear and casc_rsi_sell and casc_size_ok and in_session and casc_cool_ok and close < ma50 and trading_allowed
+bool casc_sell_t2 = use_cascade and pip_move_down >= cascade_pip_2 and pip_move_down < cascade_pip_3 and casc_vol_ok and h4_bear and casc_rsi_sell and casc_size_ok and in_session and casc_cool_ok and close < ma50 and trading_allowed
+bool casc_sell_t3 = use_cascade and pip_move_down >= cascade_pip_3 and casc_vol_ok and h4_bear and casc_rsi_sell and in_session and casc_cool_ok and close < ma50 and trading_allowed
+bool casc_buy_t1  = use_cascade and pip_move_up >= cascade_pip_1 and pip_move_up < cascade_pip_2 and casc_vol_ok and h4_bull and casc_rsi_buy and casc_size_ok and in_session and casc_cool_ok and close > ma50 and trading_allowed
+bool casc_buy_t2  = use_cascade and pip_move_up >= cascade_pip_2 and pip_move_up < cascade_pip_3 and casc_vol_ok and h4_bull and casc_rsi_buy and casc_size_ok and in_session and casc_cool_ok and close > ma50 and trading_allowed
+bool casc_buy_t3  = use_cascade and pip_move_up >= cascade_pip_3 and casc_vol_ok and h4_bull and casc_rsi_buy and in_session and casc_cool_ok and close > ma50 and trading_allowed
+
+bool casc_sell = casc_sell_t1 or casc_sell_t2 or casc_sell_t3
+bool casc_buy  = casc_buy_t1  or casc_buy_t2  or casc_buy_t3
+
+bool final_buy  = (buy_signal or casc_buy)  and strategy.position_size == 0
+bool final_sell = (sell_signal or casc_sell) and strategy.position_size == 0
+
+// ============================================================
+// PLOTS
+// ============================================================
+plotshape(buy_signal,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small)
+plotshape(sell_signal, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.small)
+plotshape(casc_sell_t1 and not casc_sell_t2 and not casc_sell_t3, title="CASC S T1", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(casc_sell_t2 and not casc_sell_t3,                       title="CASC S T2", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.small)
+plotshape(casc_sell_t3,                                             title="CASC S T3", style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.normal)
+plotshape(casc_buy_t1 and not casc_buy_t2 and not casc_buy_t3,   title="CASC B T1", style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0),   size=size.tiny)
+plotshape(casc_buy_t2 and not casc_buy_t3,                         title="CASC B T2", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.small)
+plotshape(casc_buy_t3,                                              title="CASC B T3", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.normal)
+
+// ============================================================
+// PROTECTION ENGINE
+// ============================================================
+var float trail_long  = na
+var float trail_short = na
+var float entry_ref   = na
+var bool  be_on       = false
+var bool  trail_on    = false
+
+sl_dist    = atr_val * atr_sl_mult
+trail_dist = atr_val * atr_trail_mult
+
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    entry_ref  := strategy.opentrades.entry_price(0)
+    be_on      := false
+    trail_on   := false
+    trail_long := entry_ref - sl_dist
+
+if strategy.position_size < 0 and strategy.position_size[1] == 0
+    entry_ref   := strategy.opentrades.entry_price(0)
+    be_on       := false
+    trail_on    := false
+    trail_short := entry_ref + sl_dist
+
+if strategy.position_size > 0
+    float pd = high - entry_ref
+    if not be_on and pd >= sl_dist * be_trigger
+        trail_long := entry_ref + (atr_val * be_premium)
+        be_on      := true
+    if pd >= sl_dist * 2.2
+        trail_on := true
+    if trail_on
+        nt = high - trail_dist
+        if nt > trail_long
+            trail_long := nt
+    if use_trailing and not na(trail_long)
+        strategy.exit("LONG_TP1",   "LONG", qty_percent=33, stop=trail_long, limit=entry_ref + sl_dist * 2.5)
+        strategy.exit("LONG_TP2",   "LONG", qty_percent=33, stop=trail_long, limit=entry_ref + sl_dist * 5.5)
+        strategy.exit("LONG_TRAIL", "LONG",                 stop=trail_long, limit=entry_ref + sl_dist * 9.0)
+
+if strategy.position_size < 0
+    float pd = entry_ref - low
+    if not be_on and pd >= sl_dist * be_trigger
+        trail_short := entry_ref - (atr_val * be_premium)
+        be_on       := true
+    if pd >= sl_dist * 2.2
+        trail_on := true
+    if trail_on
+        nt = low + trail_dist
+        if nt < trail_short
+            trail_short := nt
+    if use_trailing and not na(trail_short)
+        strategy.exit("SHORT_TP1",   "SHORT", qty_percent=33, stop=trail_short, limit=entry_ref - sl_dist * 2.5)
+        strategy.exit("SHORT_TP2",   "SHORT", qty_percent=33, stop=trail_short, limit=entry_ref - sl_dist * 5.5)
+        strategy.exit("SHORT_TRAIL", "SHORT",                 stop=trail_short, limit=entry_ref - sl_dist * 9.0)
+
+// ============================================================
+// ENTRIES — risk-based with leverage cap and low-vol floor
+// ============================================================
+risk_cash   = strategy.equity * (risk_percent * dd_risk_scale / 100.0)
+sizing_dist = math.max(sl_dist, hist_atr * 0.6 * atr_sl_mult)   // low-vol floor: quiet markets can't inflate size
+raw_units   = na(sizing_dist) or sizing_dist == 0 ? 0.0 : risk_cash / sizing_dist
+cap_units   = (strategy.equity * max_leverage) / close           // hard notional cap
+trade_units = math.floor(math.min(raw_units, cap_units) * 100) / 100
+
+if final_buy and strategy.position_size == 0 and trade_units >= min_qty
+    strategy.entry("LONG", strategy.long, qty=trade_units)
+
+if final_sell and strategy.position_size == 0 and trade_units >= min_qty
+    strategy.entry("SHORT", strategy.short, qty=trade_units)
+
+// NON TRAILING EXITS - LONG AND SHORT BOTH COVERED
+var bool non_trail_active = false
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    non_trail_active := true
+if strategy.position_size == 0
+    non_trail_active := false
+
+if not use_trailing and non_trail_active and strategy.position_size > 0
+    strategy.exit("LONG_TP1", "LONG", qty_percent=33, stop=entry_ref - sl_dist, limit=entry_ref + sl_dist * 2.5)
+    strategy.exit("LONG_TP2", "LONG", qty_percent=33, stop=entry_ref - sl_dist, limit=entry_ref + sl_dist * 5.5)
+    strategy.exit("LONG_TP3", "LONG",                 stop=entry_ref - sl_dist, limit=entry_ref + sl_dist * 9.0)
+
+if not use_trailing and non_trail_active and strategy.position_size < 0
+    strategy.exit("SHORT_TP1", "SHORT", qty_percent=33, stop=entry_ref + sl_dist, limit=entry_ref - sl_dist * 2.5)
+    strategy.exit("SHORT_TP2", "SHORT", qty_percent=33, stop=entry_ref + sl_dist, limit=entry_ref - sl_dist * 5.5)
+    strategy.exit("SHORT_TP3", "SHORT",                 stop=entry_ref + sl_dist, limit=entry_ref - sl_dist * 9.0)
+
+plot(strategy.position_size > 0 and use_trailing ? trail_long  : na, "Trail Long",  color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and use_trailing ? trail_short : na, "Trail Short", color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+
+// ============================================================
+// WEBHOOK ALERTS
+// (alertcondition messages must be const strings — lot size for
+//  the EA stays hardcoded here; size properly on the EA side)
+// ============================================================
+alertcondition(final_buy,        title="GMC BUY SIGNAL",       message='{"action":"BUY","symbol":"XAUUSD","lots":0.5,"comment":"GMC_BUY"}')
+alertcondition(final_sell,       title="GMC SELL SIGNAL",      message='{"action":"SELL","symbol":"XAUUSD","lots":0.5,"comment":"GMC_SELL"}')
+alertcondition(daily_limit_hit,  title="GMC DAILY LIMIT HIT",  message='{"action":"STOP","symbol":"XAUUSD","comment":"DAILY_LIMIT_HIT"}')
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.new(color.gray, 70))
+    table.cell(t, 0, 0,  "GMC v9.2",     bgcolor=color.new(color.orange, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 0,  "COMPILED",     bgcolor=color.new(color.orange, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 1,  "H4 Bias",      text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 1,  h4_bull ? "BULL" : h4_bear ? "BEAR" : "FLAT", bgcolor=h4_bull ? color.new(color.green, 40) : h4_bear ? color.new(color.red, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 2,  "Trend",        text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 2,  trend_buy ? "BULL" : trend_sell ? "BEAR" : "CHOP", bgcolor=trend_buy ? color.new(color.green, 40) : trend_sell ? color.new(color.red, 40) : color.new(color.orange, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 3,  "Bull Score",   text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 3,  str.tostring(bull_score) + "/6", bgcolor=bull_score >= 6 ? color.new(color.green, 20) : bull_score >= 4 ? color.new(color.orange, 40) : color.new(color.red, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 4,  "Bear Score",   text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 4,  str.tostring(bear_score) + "/6", bgcolor=bear_score >= 6 ? color.new(color.red, 20) : bear_score >= 4 ? color.new(color.orange, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 5,  "RSI",          text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 5,  str.tostring(rsi_val, "#.#"), bgcolor=(rsi_bull_valid or rsi_bear_valid) ? color.new(color.green, 40) : color.new(color.red, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 6,  "Volume",       text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 6,  vol_confirmed ? "SURGE" : "LOW", bgcolor=vol_confirmed ? color.new(color.green, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 7,  "Drawdown",     text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 7,  str.tostring(drawdown_pct, "#.#") + "%", bgcolor=halted ? color.new(color.red, 10) : drawdown_pct >= dd_scale_start ? color.new(color.orange, 30) : color.new(color.green, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 8,  "Session",      text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 8,  in_london_prime ? "LONDON" : in_ny_prime ? "NY PRIME" : in_session ? "ACTIVE" : "CLOSED", bgcolor=in_london_prime or in_ny_prime ? color.new(color.green, 20) : in_session ? color.new(color.green, 50) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 9,  "Trail",        text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 9,  trail_on ? "RUNNING" : be_on ? "BE" : "INIT", bgcolor=trail_on ? color.new(color.green, 40) : be_on ? color.new(color.blue, 40) : color.new(color.gray, 40), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 10, "ATR Stop",     text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 10, str.tostring(sl_dist / pip_mult, "#.#") + "p", text_color=color.white, text_size=size.tiny)
+    table.cell(t, 0, 11, "Day Limit",    text_color=color.new(color.white, 10), text_size=size.tiny)
+    table.cell(t, 1, 11, halted ? "HALTED" : daily_limit_hit ? "STOP" : monthly_limit_hit ? "MONTH STOP" : "OK", bgcolor=halted or daily_limit_hit or monthly_limit_hit ? color.new(color.red, 10) : color.new(color.green, 40), text_color=color.white, text_size=size.tiny)
