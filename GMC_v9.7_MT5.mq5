@@ -19,7 +19,7 @@
 //|     flatten-and-freeze at 20% drawdown from peak equity          |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "9.72"
+#property version   "9.73"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -29,6 +29,10 @@ CTrade trade;
 //+------------------------------------------------------------------+
 // INPUTS
 //+------------------------------------------------------------------+
+input group "--- Dashboard ---"
+input bool   Show_Dashboard     = true;   // Live decision monitor drawn on the chart
+input bool   Verbose_Log        = false;  // Print one decision line per M15 bar to Experts tab
+
 input group "--- Identity ---"
 input int    Magic_Number       = 10097;
 input int    Slippage_Points    = 20;
@@ -161,6 +165,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   Comment("");
    IndicatorRelease(hATR14); IndicatorRelease(hATR100);
    IndicatorRelease(hMA50);  IndicatorRelease(hRSI); IndicatorRelease(hMA_H4);
 }
@@ -300,8 +305,10 @@ void CheckSignals()
    if(curBar == lastSignalBar) return;
    lastSignalBar = curBar;
 
-   if(PositionOpen() || !TradingAllowed() || !InSession()) return;
-   if(BarsSinceClose() < Cooldown_Bars && BarsSinceClose() < Cascade_Cooldown) return;
+   if(PositionOpen()) return;
+   bool allowed    = TradingAllowed();
+   bool inSess     = InSession();
+   int  sinceClose = BarsSinceClose();
 
    // --- data (shift 1 = last closed M15 bar); buffer sized from the
    //     largest lookback any loop below uses (volume avg reads r[Vol_Period])
@@ -392,6 +399,32 @@ void CheckSignals()
 
    bool finalBuy  = buySignal  || cascBuy;
    bool finalSell = sellSignal || cascSell;
+
+   // --- DECISION MONITOR: what the EA is thinking, every M15 bar
+   if(Show_Dashboard)
+   {
+      string hud = "\n  GMC v9.7 — DECISION MONITOR (updates each M15 close)\n";
+      hud += "  --------------------------------------------------\n";
+      hud += "  Session 12-17 GMT:   " + (inSess ? "OPEN — hunting" : "CLOSED — waiting") + "\n";
+      hud += "  Protections:         " + (halted ? "HARD STOP (frozen)" : allowed ? "clear" : "BLOCKED (daily/monthly/loss-streak)") + "\n";
+      hud += "  Cooldown:            " + (sinceClose >= Cooldown_Bars ? "ready" : IntegerToString(Cooldown_Bars - sinceClose) + " bars left") + "\n";
+      hud += StringFormat("  BULL score %d/%d:      trend:%s rej:%s vol:%s rsi:%s slope:%s H4:%s\n",
+             bullScore, Min_Score, trendBuyStable?"Y":"-", bullRej?"Y":"-", volConfirmed?"Y":"-", rsiBull?"Y":"-", slopeUp?"Y":"-", h4Bull?"Y":"-");
+      hud += StringFormat("  BEAR score %d/%d:      trend:%s rej:%s vol:%s rsi:%s slope:%s H4:%s\n",
+             bearScore, Min_Score, trendSellStable?"Y":"-", bearRej?"Y":"-", volConfirmed?"Y":"-", rsiBear?"Y":"-", slopeDown?"Y":"-", h4Bear?"Y":"-");
+      hud += StringFormat("  Confirm bars:        bull:%s bear:%s\n", bullConfirmed?"Y":"-", bearConfirmed?"Y":"-");
+      hud += StringFormat("  Volatility guard:    %s     Extension guard: %s\n", volaOk?"ok":"BLOCK", notExtended?"ok":"BLOCK");
+      hud += StringFormat("  Cascade:             buy:%s sell:%s   (up %.0fp / down %.0fp of %.0fp trigger)\n", cascBuy?"FIRE":"-", cascSell?"FIRE":"-", moveUp, moveDown, Cascade_Pip_1);
+      hud += StringFormat("  ATR14: %.2f   RSI: %.1f   Dist from MA50: %+.2f\n", atr, rv, c1 - ma50);
+      hud += StringFormat("  Losses today: %d/%d    Equity: %.2f\n", lossesToday, Max_Daily_Losses, AccountInfoDouble(ACCOUNT_EQUITY));
+      Comment(hud);
+   }
+   if(Verbose_Log)
+      Log(StringFormat("bar | sess:%s allow:%s cool:%d | bull %d/%d bear %d/%d | vola:%s ext:%s | casc up %.0f dn %.0f",
+          inSess?"Y":"N", allowed?"Y":"N", sinceClose, bullScore, Min_Score, bearScore, Min_Score,
+          volaOk?"ok":"X", notExtended?"ok":"X", moveUp, moveDown));
+
+   if(!inSess || !allowed) return;
    if(!finalBuy && !finalSell) return;
 
    // --- sizing and entry with SL/TP on the ticket
@@ -446,6 +479,19 @@ void ManagePosition()
    double atr[]; if(!GetBuf(hATR14, 0, 1, atr)) return;
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
    double openPnl = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+
+   // --- TRADE MONITOR: live position state on the chart
+   if(Show_Dashboard)
+   {
+      double rNow = riskAtEntry > 0 ? profitDist / riskAtEntry : 0;
+      string hud = "\n  GMC v9.7 — TRADE MONITOR\n";
+      hud += "  --------------------------------------------------\n";
+      hud += StringFormat("  %s %.2f lots @ %.2f\n", isLong?"LONG":"SHORT", vol, entryPrice);
+      hud += StringFormat("  Open P/L: %.2f  (%+.2f R)    Best: %+.2f R\n", openPnl, rNow, riskAtEntry>0?maxFav/riskAtEntry:0);
+      hud += StringFormat("  Ladder:  TP1:%s  TP2:%s  BE:%s  Trail:%s\n", tp1Done?"BANKED":"...", tp2Done?"BANKED":"...", beArmed?"LOCKED":"-", trailOn?"RUNNING":"-");
+      hud += StringFormat("  Bars in trade: %d    SL %.2f | TP %.2f\n", BarsInTrade(), curSL, curTP);
+      Comment(hud);
+   }
 
    // G. LOSS FLOOR
    if(Use_Loss_Floor && openPnl <= -(eq * Max_Trade_Loss_Pct / 100.0))
