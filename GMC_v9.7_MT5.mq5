@@ -19,7 +19,7 @@
 //|     flatten-and-freeze at 20% drawdown from peak equity          |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "9.73"
+#property version   "9.74"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -75,6 +75,8 @@ input group "--- Session (GMT) ---"
 input bool   Use_Overlap_Only   = true;   // London-NY overlap only
 input int    Overlap_Start_GMT  = 12;
 input int    Overlap_End_GMT    = 17;
+input bool   Use_Server_Clock   = true;   // Derive GMT from broker server time (immune to broken OS/Wine clocks)
+input int    Server_GMT_Offset  = 3;      // ICMarkets: +3 in summer (DST), +2 in winter — flip in late Oct/Nov
 
 input group "--- Loss Floor & Early Abort ---"
 input bool   Use_Loss_Floor     = true;
@@ -263,11 +265,23 @@ bool TradingAllowed()
    return true;
 }
 
+int GmtHourNow()
+{
+   MqlDateTime t;
+   if(Use_Server_Clock)
+   {
+      TimeToStruct(TimeTradeServer(), t);
+      return (t.hour - Server_GMT_Offset + 24) % 24;
+   }
+   TimeToStruct(TimeGMT(), t);
+   return t.hour;
+}
+
 bool InSession()
 {
    if(!Use_Overlap_Only) return true;
-   MqlDateTime t; TimeToStruct(TimeGMT(), t);
-   return (t.hour >= Overlap_Start_GMT && t.hour < Overlap_End_GMT);
+   int h = GmtHourNow();
+   return (h >= Overlap_Start_GMT && h < Overlap_End_GMT);
 }
 
 //+------------------------------------------------------------------+
@@ -405,7 +419,8 @@ void CheckSignals()
    {
       string hud = "\n  GMC v9.7 — DECISION MONITOR (updates each M15 close)\n";
       hud += "  --------------------------------------------------\n";
-      hud += "  Session 12-17 GMT:   " + (inSess ? "OPEN — hunting" : "CLOSED — waiting") + "\n";
+      hud += StringFormat("  Session %02d-%02d GMT:   %s   (EA thinks GMT is %02d:xx)\n", Overlap_Start_GMT, Overlap_End_GMT, inSess ? "OPEN — hunting" : "CLOSED — waiting", GmtHourNow());
+      hud += StringFormat("  Clocks:              server %s | os-gmt %s | local %s\n", TimeToString(TimeTradeServer(), TIME_MINUTES), TimeToString(TimeGMT(), TIME_MINUTES), TimeToString(TimeLocal(), TIME_MINUTES));
       hud += "  Protections:         " + (halted ? "HARD STOP (frozen)" : allowed ? "clear" : "BLOCKED (daily/monthly/loss-streak)") + "\n";
       hud += "  Cooldown:            " + (sinceClose >= Cooldown_Bars ? "ready" : IntegerToString(Cooldown_Bars - sinceClose) + " bars left") + "\n";
       hud += StringFormat("  BULL score %d/%d:      trend:%s rej:%s vol:%s rsi:%s slope:%s H4:%s\n",
