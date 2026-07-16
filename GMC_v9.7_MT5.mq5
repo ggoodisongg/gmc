@@ -19,7 +19,7 @@
 //|     flatten-and-freeze at 20% drawdown from peak equity          |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "9.71"
+#property version   "9.72"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -55,6 +55,7 @@ input double Max_Ext_ATR        = 3.0;    // Max distance from MA50 (x ATR)
 input double Vola_ATR_Mult      = 6.0;    // Max 15-bar range (x ATR)
 input double ATR_SL_Mult        = 1.8;    // Stop loss (x ATR14)
 input double ATR_Trail_Mult     = 3.2;    // Trailing distance (x ATR14)
+input double Trail_Step_Min     = 0.25;   // Min SL improvement (price units) before sending a modify — prevents per-tick order spam
 
 input group "--- Win Rate Control ---"
 input bool   Use_Buffer         = true;   // MA buffer zone (0.35 x ATR)
@@ -487,15 +488,21 @@ void ManagePosition()
       }
    }
 
-   // Trailing — arms at 2.2R, ratchets at 3.2xATR, never loosens
+   // Trailing — arms at 2.2R, ratchets at 3.2xATR, never loosens.
+   // Throttled: only modify when the stop improves by Trail_Step_Min
+   // and stays outside the broker's minimum stop distance — otherwise
+   // the trail spams a modify order on every tick ([Invalid stops]).
    if(profitDist >= riskAtEntry * Trail_Arm_R) trailOn = true;
    if(trailOn && PositionSelect(_Symbol))
    {
       curSL = PositionGetDouble(POSITION_SL);
       curTP = PositionGetDouble(POSITION_TP);
-      double newSL = isLong ? price - atr[0] * ATR_Trail_Mult : price + atr[0] * ATR_Trail_Mult;
-      if((isLong && newSL > curSL) || (!isLong && newSL < curSL))
-         trade.PositionModify(_Symbol, NormalizeDouble(newSL, _Digits), curTP);
+      double newSL = NormalizeDouble(isLong ? price - atr[0] * ATR_Trail_Mult : price + atr[0] * ATR_Trail_Mult, _Digits);
+      double stopsLevel = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+      bool improves = isLong ? (newSL >= curSL + Trail_Step_Min) : (newSL <= curSL - Trail_Step_Min);
+      bool farEnough = MathAbs(price - newSL) > stopsLevel;
+      if(improves && farEnough)
+         trade.PositionModify(_Symbol, newSL, curTP);
    }
 }
 
