@@ -19,7 +19,7 @@
 //|     flatten-and-freeze at 20% drawdown from peak equity          |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "9.70"
+#property version   "9.71"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -302,10 +302,12 @@ void CheckSignals()
    if(PositionOpen() || !TradingAllowed() || !InSession()) return;
    if(BarsSinceClose() < Cooldown_Bars && BarsSinceClose() < Cascade_Cooldown) return;
 
-   // --- data (shift 1 = last closed M15 bar)
+   // --- data (shift 1 = last closed M15 bar); buffer sized from the
+   //     largest lookback any loop below uses (volume avg reads r[Vol_Period])
+   int need = MathMax(Vol_Period + 2, MathMax(Cascade_Bars + 2, 20));
    MqlRates r[];
    ArraySetAsSeries(r, true);
-   if(CopyRates(_Symbol, PERIOD_M15, 0, 20, r) < 20) return;
+   if(CopyRates(_Symbol, PERIOD_M15, 0, need, r) < need) return;
 
    double atr14[], atr100[], ma[], rsi[], maH4[];
    if(!GetBuf(hATR14, 1, 2, atr14))   return;
