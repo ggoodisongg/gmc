@@ -1,0 +1,169 @@
+//@version=5
+strategy("G MONEY CORE - TRACK B v10.49_MACRO_STRIKE", overlay=true, pyramiding=5, initial_capital=5000, currency=currency.GBP, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.015, slippage=1, calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=false)
+
+//============================================================================
+// SYSTEM INPUT CONFIGURATION
+//============================================================================
+grp_prop  = "🛡️ Prop Firm Risk Guardrail"
+Max_Daily_Loss_Pct = input.float(4.5, "Max Daily Loss Threshold (%)", minval=1.0, maxval=5.0, group=grp_prop)
+
+grp_shift = "🎯 Sniper Turning Point Filters"
+Retrace_Lookback      = input.int(30, "Macro Retrace Lookback", minval=5, group=grp_shift)
+Volume_Threshold_Mult = input.float(1.2, "Minimum Volume Engine (ATR Mult)", minval=0.5, step=0.1, group=grp_shift)
+ATR_Period            = input.int(14, "Volatility ATR Period", minval=1, group=grp_shift)
+Retrace_ATR_Buffer    = input.float(0.25, "Retrace Buffer (ATR Mult)", minval=0.05, step=0.05, group=grp_shift)
+Trend_Confirm_Bars    = input.int(1, "Trend Confirm Bars", minval=1, maxval=5, group=grp_shift)
+Use_Light_Trend_Mode  = input.bool(true, "Add Loose Trend Entry Mode", group=grp_shift)
+
+grp_fric  = "🎟️ Friction & Spread Efficiency Engine"
+Min_ATR_Points        = input.float(1.5, "Min Volatility Floor (Gold Points)", minval=0.0, step=0.1)
+
+grp_exit = "⚡ Max Margin Harvest Matrix"
+Storm_Cushion_Mult   = input.float(2.5, "Storm Ceiling Cushion (ATR Mult)", minval=1.0, step=0.5, group=grp_exit)
+Partial_TP_Ratio     = input.float(1.2, "Tier 1 Partial TP (R-Multiple)", minval=0.5, step=0.1, group=grp_exit)
+Macro_Trail_Mult     = input.float(3.5, "Runner Macro Trailing Cushion (ATR Mult)", minval=1.5, step=0.1, tooltip="Distance given to the dynamic trailing stop behind the trade's peak price", group=grp_exit)
+
+//============================================================================
+// HARD PROP COMPLIANCE ENGINE
+//============================================================================
+var float base_daily_equity = strategy.initial_capital
+if ta.change(time("D")) != 0
+    base_daily_equity := strategy.equity
+
+float current_daily_loss = base_daily_equity - strategy.equity
+float max_allowed_loss   = base_daily_equity * (Max_Daily_Loss_Pct / 100.0)
+bool  daily_breach_hit   = current_daily_loss >= max_allowed_loss
+
+if daily_breach_hit
+    strategy.close_all(comment="DAILY RISK BREACH")
+
+//============================================================================
+// CORE DATA ENGINE
+//============================================================================
+atr_value    = ta.atr(ATR_Period)
+atr_sma20    = ta.sma(atr_value, 20)
+float clean_atr = nz(atr_value, ta.tr(true))
+
+bool institutional_volume = not na(atr_sma20) and clean_atr >= atr_sma20 * Volume_Threshold_Mult
+bool volatility_efficient  = clean_atr >= Min_ATR_Points
+
+float raw_highest = ta.highest(high, Retrace_Lookback)
+float raw_lowest  = ta.lowest(low, Retrace_Lookback)
+
+// One-trigger-per-bar throttle.
+// FIX: the previous version reset this to 0 on every bar via `ta.change(time)`,
+// which is non-zero on every new bar. That nullified the guard entirely and let
+// entries fire on every tick (calc_on_every_tick=true) and stack via pyramiding.
+// We now simply record the bar-time of the last entry and block re-triggering
+// within that same bar.
+var int last_trigger_time = 0
+
+bool entry_allowed = (time != last_trigger_time) or (strategy.position_size == 0)
+
+//----------------------------------------------------------------------------
+// BI-DIRECTIONAL CONDITION ENGINE
+//----------------------------------------------------------------------------
+// Short Logic
+float retrace_ceiling     = nz(raw_highest, high) - (clean_atr * Retrace_ATR_Buffer)
+bool is_short_retraced    = high >= retrace_ceiling
+bool candle_shifted_down  = close < open and close < ((open[1] + close[1]) / 2.0)
+bool bearish_body         = close < open and close < close[1]
+bool short_trend_confirm  = ta.barssince(close > open) >= Trend_Confirm_Bars
+
+bool sniperShortCondition = is_short_retraced and candle_shifted_down and institutional_volume
+bool trendShortCondition  = Use_Light_Trend_Mode and short_trend_confirm and bearish_body and institutional_volume
+bool shortCondition       = (sniperShortCondition or trendShortCondition) and volatility_efficient and not daily_breach_hit and entry_allowed
+
+// Long Logic
+float retrace_floor      = nz(raw_lowest, low) + (clean_atr * Retrace_ATR_Buffer)
+bool is_long_retraced    = low <= retrace_floor
+bool candle_shifted_up   = close > open and close > ((open[1] + close[1]) / 2.0)
+bool bullish_body        = close > open and close > close[1]
+bool long_trend_confirm  = ta.barssince(close < open) >= Trend_Confirm_Bars
+
+bool sniperLongCondition = is_long_retraced and candle_shifted_up and institutional_volume
+bool trendLongCondition  = Use_Light_Trend_Mode and long_trend_confirm and bullish_body and institutional_volume
+bool longCondition       = (sniperLongCondition or trendLongCondition) and volatility_efficient and not daily_breach_hit and entry_allowed
+
+//----------------------------------------------------------------------------
+// EXECUTION ROUTING
+//----------------------------------------------------------------------------
+if longCondition
+    strategy.entry("Long", strategy.long)
+    last_trigger_time := time
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    last_trigger_time := time
+
+//----------------------------------------------------------------------------
+// RUNTIME PEAK AND VALE TRACKING FOR POSITION LIFE
+//----------------------------------------------------------------------------
+var float trade_peak_price = 0.0
+var float trade_valley_price = 0.0
+
+if strategy.position_size > 0
+    if strategy.position_size[1] <= 0 // Fresh long entry
+        trade_peak_price := high
+    else
+        trade_peak_price := math.max(high, trade_peak_price)
+else if strategy.position_size < 0
+    if strategy.position_size[1] >= 0 // Fresh short entry
+        trade_valley_price := low
+    else
+        trade_valley_price := math.min(low, trade_valley_price)
+
+//----------------------------------------------------------------------------
+// DYNAMIC VOLATILITY-BASED EXIT MATRIX
+//----------------------------------------------------------------------------
+float fill_price = strategy.position_avg_price
+
+// Initial static protections
+float long_initial_stop   = fill_price - (clean_atr * Storm_Cushion_Mult)
+float long_stop_size      = fill_price - long_initial_stop
+float long_partial_tp     = fill_price + (long_stop_size * Partial_TP_Ratio)
+
+float short_initial_stop  = fill_price + (clean_atr * Storm_Cushion_Mult)
+float short_stop_size     = short_initial_stop - fill_price
+float short_partial_tp    = fill_price - (short_stop_size * Partial_TP_Ratio)
+
+// Dynamic Trailing Values for Runner Execution
+float dynamic_long_trail  = trade_peak_price - (clean_atr * Macro_Trail_Mult)
+float dynamic_short_trail = trade_valley_price + (clean_atr * Macro_Trail_Mult)
+
+// Persistent, MONOTONIC protective stops.
+// FIX: the previous version recomputed `active_*_stop` from scratch each bar as
+// math.max(initial, dynamic_trail). Because clean_atr changes every bar, an ATR
+// expansion could push the dynamic trail (and therefore the stop) BACKWARD,
+// loosening a stop mid-trade and handing back open profit — turning would-be
+// wins into losses. A trail must only ratchet toward profit, never retreat.
+// We hold the stop in a persistent var and only ever tighten it, resetting to na
+// when flat so each new trade starts fresh.
+var float active_long_stop  = na
+var float active_short_stop = na
+
+if strategy.position_size > 0 and not daily_breach_hit
+    float long_candidate = math.max(long_initial_stop, dynamic_long_trail)
+    active_long_stop  := na(active_long_stop) ? long_candidate : math.max(active_long_stop, long_candidate)
+    active_short_stop := na
+
+    // Partial target exits half the size; the runner keeps the remainder.
+    strategy.exit("L Partial", "Long", qty_percent=50, limit=long_partial_tp, stop=active_long_stop, comment="L Part")
+    // Runner stays active using the dynamic structural trailing stop (No fixed profit limit)
+    strategy.exit("L Run", "Long", stop=active_long_stop, comment="L Macro Run")
+
+else if strategy.position_size < 0 and not daily_breach_hit
+    float short_candidate = math.min(short_initial_stop, dynamic_short_trail)
+    active_short_stop := na(active_short_stop) ? short_candidate : math.min(active_short_stop, short_candidate)
+    active_long_stop  := na
+
+    // Partial target exits half the size; the runner keeps the remainder.
+    strategy.exit("S Partial", "Short", qty_percent=50, limit=short_partial_tp, stop=active_short_stop, comment="S Part")
+    // Runner stays active using the dynamic structural trailing stop (No fixed profit limit)
+    strategy.exit("S Run", "Short", stop=active_short_stop, comment="S Macro Run")
+
+else
+    // Flat (or daily breach handled by close_all) — clear the trailing state so
+    // the next trade rebuilds its stop from its own entry.
+    active_long_stop  := na
+    active_short_stop := na
