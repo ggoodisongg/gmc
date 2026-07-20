@@ -2,6 +2,29 @@
 strategy("G MONEY CORE - TRACK B v10.52_MACRO_STRIKE", overlay=true, pyramiding=5, initial_capital=5000, currency=currency.GBP, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.015, slippage=1, calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=false)
 
 //============================================================================
+// ❄️  FROZEN — VALIDATED VERSION  ·  v10.52_MACRO_STRIKE  ·  2026-07-20
+//============================================================================
+// This configuration is FROZEN. Do not edit in place — branch new work as
+// v10.53 from this file (versioned-lineage discipline).
+//
+// Instrument / TF : OANDA XAUUSD, 15m
+// Validated over  : ~1,000-trade sample (plus 88 & 357-trade confirmations)
+//   Win rate      : 51.5%
+//   Profit factor : 2.33
+//   Expectancy    : £2.67 / trade
+//   Net (993 tr)  : +£2,650
+// Validated inputs (must be ON): Enter-on-closed-candles ✔ · Pyramid-winners-only ✔
+//                 · BE-lock-after-partial ✔ · Confirmed-cut ✔
+//   Cooldown = 1 (LOCKED — raising it destroys the edge) · Bars-before-cut = 4
+//
+// Lineage of this frozen state (what earned the freeze):
+//   v10.49  baseline leaks — dead entry throttle, non-monotonic trail
+//   v10.50  break-even lock after partial, monotonic trail, churn guards
+//   v10.51  ENTER-ON-CLOSED-CANDLES gate  → win% 40% → 51%, PF → 2.44
+//   v10.52  pyramid-into-winners (risk hygiene; performance-neutral vs 10.51)
+//============================================================================
+
+//============================================================================
 // SYSTEM INPUT CONFIGURATION
 //============================================================================
 grp_prop  = "🛡️ Prop Firm Risk Guardrail"
