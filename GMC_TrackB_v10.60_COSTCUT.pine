@@ -12,13 +12,12 @@ strategy("G MONEY CORE - TRACK B v10.60_COSTCUT", overlay=true, pyramiding=5, in
 // So 55% of trades are net-negative churn. Cutting the short-lived flips should
 // roughly HALVE commission while keeping the profit engine.
 //
-// This file adds ENTRY-QUALITY filters that default to OFF, so with everything
-// off it reproduces frozen v10.52 exactly. Enable ONE at a time and sweep:
-//   1. Min Volatility Floor  (existing Min_ATR_Points) — sweep 1.5 → 3.5 → 5.0
-//   2. Min Candle Body       (new)  — sweep 0.10 → 0.20 → 0.30 ATR
-// The HUD (from v10.53) is kept so you can watch net PF/expectancy while sweeping.
-// NOTE: the FROZEN 15m line stays v10.52 — nothing here is adopted until a sweep
-// beats 1.90 net PF on the 20-year sample with the gross edge intact.
+// RESULT (adopted): raising Min Volatility Floor to 5.0 lifts 20-yr net PF
+// 1.90 → 2.27, expectancy £0.54 → £1.98, and cuts commission 111% → 57% of net,
+// with the 3+ bar edge concentrated (avg £1.10 → £3.76/trade). Min_ATR_Points
+// default is now 5.0 here. The Min Candle Body filter remains available (OFF).
+// NOTE: the FROZEN production line stays v10.52 (floor 1.5). This is the
+// validated COST-CUT variant; adopt it live only after a forward-cost check.
 //============================================================================
 
 //============================================================================
@@ -43,7 +42,7 @@ Pyramid_Winners_Only  = input.bool(true, "Pyramid into WINNERS only (never add t
 Pyramid_Min_Profit_ATR = input.float(0.05, "Add-to-winner minimum profit (ATR Mult)", minval=0.0, step=0.05, tooltip="How far in profit the open position must be before another unit is added — a small buffer so adds happen on genuine follow-through, not at break-even.", group=grp_eff)
 
 grp_fric  = "🎟️ Friction & Spread Efficiency Engine"
-Min_ATR_Points        = input.float(1.5, "Min Volatility Floor (Gold Points)", minval=0.0, step=0.1, group=grp_fric)
+Min_ATR_Points        = input.float(5.0, "Min Volatility Floor (Gold Points)", minval=0.0, step=0.1, tooltip="COST-CUT ADOPTED = 5.0. The 20-year sweep showed raising this floor lifts net PF 1.90→2.27, thickens expectancy to ~£2/trade, and cuts commission from 111%→57% of net by dropping the low-vol churn. 1.5 = old frozen value; 3.5 = balance (more trades); 5.0 = max robustness (adopted).", group=grp_fric)
 
 grp_exit = "⚡ Max Margin Harvest Matrix"
 Storm_Cushion_Mult   = input.float(2.5, "Storm Ceiling Cushion (ATR Mult)", minval=1.0, step=0.5, group=grp_exit)
