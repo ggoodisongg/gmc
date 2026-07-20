@@ -300,7 +300,7 @@ if Show_HUD and barstate.islast
     string flags   = (Entry_On_Bar_Close ? "Close✔" : "Close✘") + "  " + (Pyramid_Winners_Only ? "Pyr✔" : "Pyr✘") + "  " + (daily_breach_hit ? "⛔BREACH" : "Guard✔")
 
     table.cell(hud, 0, 0, "G MONEY CORE · TRACK B", text_color=color.white, text_size=hud_txt, bgcolor=color.new(color.blue, 25), text_halign=text.align_left)
-    table.cell(hud, 1, 0, "v10.53", text_color=color.white, text_size=hud_txt, bgcolor=color.new(color.blue, 25), text_halign=text.align_right)
+    table.cell(hud, 1, 0, "v10.60", text_color=color.white, text_size=hud_txt, bgcolor=color.new(color.blue, 25), text_halign=text.align_right)
     f_row(1,  "Position",        dir, dcol)
     f_row(2,  "Entry",           flat ? "—" : str.tostring(strategy.position_avg_price, "#.##"), color.white)
     f_row(3,  "Size (contracts)",str.tostring(strategy.position_size, "#.##"), color.white)
