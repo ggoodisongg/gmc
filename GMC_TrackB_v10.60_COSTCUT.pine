@@ -1,0 +1,319 @@
+//@version=5
+strategy("G MONEY CORE - TRACK B v10.60_COSTCUT", overlay=true, pyramiding=5, initial_capital=5000, currency=currency.GBP, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.015, slippage=1, calc_on_every_tick=true, calc_on_order_fills=true, process_orders_on_close=false)
+
+//============================================================================
+// 🔬 RESEARCH BRANCH — v10.60_COSTCUT  ·  branched from FROZEN v10.52  ·  2026-07-20
+//============================================================================
+// GOAL: lift the 20-year NET profit factor (1.90) without touching the gross
+// edge, by cutting the commission drag. The 20-year log (86,343 trades) proved:
+//   • 0-bar trades  : 15,194 trades  net -£2,928  (pure churn)
+//   • 1-2 bar trades: 32,509 trades  net    +£90  (~zero, all commission)
+//   • 3+ bar trades :                net +£48,990 (ALL the profit)
+// So 55% of trades are net-negative churn. Cutting the short-lived flips should
+// roughly HALVE commission while keeping the profit engine.
+//
+// RESULT (adopted): raising Min Volatility Floor to 5.0 lifts 20-yr net PF
+// 1.90 → 2.27, expectancy £0.54 → £1.98, and cuts commission 111% → 57% of net,
+// with the 3+ bar edge concentrated (avg £1.10 → £3.76/trade). Min_ATR_Points
+// default is now 5.0 here. The Min Candle Body filter remains available (OFF).
+// NOTE: the FROZEN production line stays v10.52 (floor 1.5). This is the
+// validated COST-CUT variant; adopt it live only after a forward-cost check.
+//============================================================================
+
+//============================================================================
+// SYSTEM INPUT CONFIGURATION
+//============================================================================
+grp_prop  = "🛡️ Prop Firm Risk Guardrail"
+Max_Daily_Loss_Pct = input.float(4.5, "Max Daily Loss Threshold (%)", minval=1.0, maxval=5.0, group=grp_prop)
+
+grp_shift = "🎯 Sniper Turning Point Filters"
+Retrace_Lookback      = input.int(30, "Macro Retrace Lookback", minval=5, group=grp_shift)
+Volume_Threshold_Mult = input.float(1.2, "Minimum Volume Engine (ATR Mult)", minval=0.5, step=0.1, group=grp_shift)
+ATR_Period            = input.int(14, "Volatility ATR Period", minval=1, group=grp_shift)
+Retrace_ATR_Buffer    = input.float(0.25, "Retrace Buffer (ATR Mult)", minval=0.05, step=0.05, group=grp_shift)
+Trend_Confirm_Bars    = input.int(1, "Trend Confirm Bars", minval=1, maxval=5, group=grp_shift)
+Use_Light_Trend_Mode  = input.bool(true, "Add Loose Trend Entry Mode", group=grp_shift)
+
+grp_eff   = "🚦 Churn / Over-Trade Control"
+Entry_On_Bar_Close    = input.bool(true, "Enter only on CLOSED candles (anti-churn + anti-repaint)", tooltip="THE key fix. With calc_on_every_tick, intrabar entries fire and reverse mid-candle, producing hundreds of zero-bar flip losses. Gating entries to bar close kills that churn and honours the fully-closed-bar discipline. Exits/stops still act intrabar.", group=grp_eff)
+Cooldown_Bars         = input.int(1, "Min Bars Between Entries (kills same-bar flips)", minval=0, maxval=20, tooltip="Blocks a new entry (or reversal) until this many bars have passed since the last one. 1 = no same-bar re-entry. Raise to 2-3 to further cut commission churn.", group=grp_eff)
+Block_Instant_Reverse = input.bool(true, "Block same-bar reversals", tooltip="Prevents opening the opposite side on the very bar a position closed — the biggest commission bleed in the logs.", group=grp_eff)
+Pyramid_Winners_Only  = input.bool(true, "Pyramid into WINNERS only (never add to a loser)", tooltip="v10.52 core change. A first entry (from flat) and a reversal (flipping out of a loser) are always allowed. But an ADD in the SAME direction is only taken when the open position is already in profit. Stops the system stacking several units into one wrong signal that then all get cut together.", group=grp_eff)
+Pyramid_Min_Profit_ATR = input.float(0.05, "Add-to-winner minimum profit (ATR Mult)", minval=0.0, step=0.05, tooltip="How far in profit the open position must be before another unit is added — a small buffer so adds happen on genuine follow-through, not at break-even.", group=grp_eff)
+
+grp_fric  = "🎟️ Friction & Spread Efficiency Engine"
+Min_ATR_Points        = input.float(5.0, "Min Volatility Floor (Gold Points)", minval=0.0, step=0.1, tooltip="COST-CUT ADOPTED = 5.0. The 20-year sweep showed raising this floor lifts net PF 1.90→2.27, thickens expectancy to ~£2/trade, and cuts commission from 111%→57% of net by dropping the low-vol churn. 1.5 = old frozen value; 3.5 = balance (more trades); 5.0 = max robustness (adopted).", group=grp_fric)
+
+grp_exit = "⚡ Max Margin Harvest Matrix"
+Storm_Cushion_Mult   = input.float(2.5, "Storm Ceiling Cushion (ATR Mult)", minval=1.0, step=0.5, group=grp_exit)
+Partial_TP_Ratio     = input.float(1.2, "Tier 1 Partial TP (R-Multiple)", minval=0.5, step=0.1, group=grp_exit)
+Partial_Close_Pct    = input.float(50.0, "Tier 1 Partial Close (%)", minval=10.0, maxval=90.0, step=5.0, tooltip="Share of the position banked at Tier 1. The Partial exits carry the edge in the logs — try 60-70 to weight size toward them.", group=grp_exit)
+Macro_Trail_Mult     = input.float(3.5, "Runner Macro Trailing Cushion (ATR Mult)", minval=1.5, step=0.1, tooltip="Distance given to the dynamic trailing stop behind the trade's peak price", group=grp_exit)
+
+grp_be   = "🧷 Runner Break-Even Lock"
+Use_BE_After_Partial = input.bool(true, "Lock stop to break-even once Tier 1 is taken", tooltip="After the partial fills, the runner can no longer become a loss. This is the fix for the losing 'Macro Run' legs.", group=grp_be)
+BE_Buffer_ATR        = input.float(0.10, "Break-Even Buffer (ATR Mult)", minval=0.0, step=0.05, tooltip="Small cushion above/below entry so the locked stop also covers commission and spread.", group=grp_be)
+
+grp_cut  = "✂️ Confirmed-Candle Loss Cut"
+Use_Confirmed_Cut    = input.bool(true, "Cut losers on a confirmed adverse candle", tooltip="Cancels a losing trade EARLY, but only after the candle CLOSES against us — never on intrabar noise. Reads the full candle before acting.", group=grp_cut)
+Max_Adverse_Bars     = input.int(4, "Bars underwater before a cut is allowed", minval=1, maxval=50, tooltip="Give the trade this many bars to work before a confirmed-close cut can fire.", group=grp_cut)
+
+grp_hud  = "📟 On-Chart HUD"
+Show_HUD  = input.bool(true, "Show HUD panel", group=grp_hud)
+HUD_Where = input.string("Top Right", "HUD corner", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grp_hud)
+HUD_Size  = input.string("Normal", "HUD text size", options=["Small","Normal","Large"], group=grp_hud)
+
+grp_cost = "🔬 COST-CUT RESEARCH (default OFF = frozen v10.52)"
+Use_Body_Filter = input.bool(false, "Require a strong entry candle body", tooltip="Filters weak/doji entries that tend to flip out within 0-2 bars (the churn cohort). Enable and sweep the body size below.", group=grp_cost)
+Min_Body_ATR    = input.float(0.15, "Min entry body (ATR mult)", minval=0.0, step=0.05, tooltip="Entry candle body |close-open| must be at least this × ATR. Sweep 0.10 → 0.20 → 0.30. Higher = fewer, stronger entries = less commission.", group=grp_cost)
+
+//============================================================================
+// HARD PROP COMPLIANCE ENGINE
+//============================================================================
+var float base_daily_equity = strategy.initial_capital
+if ta.change(time("D")) != 0
+    base_daily_equity := strategy.equity
+
+float current_daily_loss = base_daily_equity - strategy.equity
+float max_allowed_loss   = base_daily_equity * (Max_Daily_Loss_Pct / 100.0)
+bool  daily_breach_hit   = current_daily_loss >= max_allowed_loss
+
+if daily_breach_hit
+    strategy.close_all(comment="DAILY RISK BREACH")
+
+//============================================================================
+// CORE DATA ENGINE
+//============================================================================
+atr_value    = ta.atr(ATR_Period)
+atr_sma20    = ta.sma(atr_value, 20)
+float clean_atr = nz(atr_value, ta.tr(true))
+
+bool institutional_volume = not na(atr_sma20) and clean_atr >= atr_sma20 * Volume_Threshold_Mult
+bool volatility_efficient  = clean_atr >= Min_ATR_Points
+
+float raw_highest = ta.highest(high, Retrace_Lookback)
+float raw_lowest  = ta.lowest(low, Retrace_Lookback)
+
+//----------------------------------------------------------------------------
+// CHURN / OVER-TRADE CONTROL
+// The logs showed hundreds of zero-bar "flip" trades whose only footprint was
+// commission (commission paid ~= net profit). We gate every entry behind a bar
+// cooldown and optionally block reversals on the same bar a position closed.
+//----------------------------------------------------------------------------
+var int last_entry_bar  = na
+var int flat_since_bar  = na
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    flat_since_bar := bar_index
+
+// Bar-close gate: with calc_on_every_tick, var writes roll back each tick, so a
+// bar-count throttle cannot stop intrabar re-entries — the strategy flips inside
+// a single candle. Requiring barstate.isconfirmed lets entries fire only once, at
+// bar close, which removes the zero-bar flip churn at the source.
+bool bar_ready        = not Entry_On_Bar_Close or barstate.isconfirmed
+bool cooldown_ok      = na(last_entry_bar) or (bar_index - last_entry_bar >= Cooldown_Bars)
+bool reversal_guard   = not Block_Instant_Reverse or na(flat_since_bar) or (bar_index != flat_since_bar)
+bool entry_allowed    = bar_ready and cooldown_ok and reversal_guard
+
+//----------------------------------------------------------------------------
+// BI-DIRECTIONAL CONDITION ENGINE
+//----------------------------------------------------------------------------
+// Pyramid-into-winners gate (v10.52).
+// A same-direction ADD is only allowed when the open position is already in
+// profit by at least the buffer. A first entry (flat) or a reversal (opposite
+// side, which flips us out of a loser) is always allowed. This stops the system
+// stacking multiple units into one wrong signal that then all get cut together.
+float win_buffer   = clean_atr * Pyramid_Min_Profit_ATR
+bool  long_add_ok  = strategy.position_size <= 0 or not Pyramid_Winners_Only or (close > strategy.position_avg_price + win_buffer)
+bool  short_add_ok = strategy.position_size >= 0 or not Pyramid_Winners_Only or (close < strategy.position_avg_price - win_buffer)
+
+// COST-CUT filter: require a meaningful candle body on the entry bar. Weak-bodied
+// signals are the ones that flip out inside 0-2 bars and only pay commission.
+bool  strong_body  = not Use_Body_Filter or (math.abs(close - open) >= clean_atr * Min_Body_ATR)
+
+// Short Logic
+float retrace_ceiling     = nz(raw_highest, high) - (clean_atr * Retrace_ATR_Buffer)
+bool is_short_retraced    = high >= retrace_ceiling
+bool candle_shifted_down  = close < open and close < ((open[1] + close[1]) / 2.0)
+bool bearish_body         = close < open and close < close[1]
+bool short_trend_confirm  = ta.barssince(close > open) >= Trend_Confirm_Bars
+
+bool sniperShortCondition = is_short_retraced and candle_shifted_down and institutional_volume
+bool trendShortCondition  = Use_Light_Trend_Mode and short_trend_confirm and bearish_body and institutional_volume
+bool shortCondition       = (sniperShortCondition or trendShortCondition) and volatility_efficient and not daily_breach_hit and entry_allowed and short_add_ok and strong_body
+
+// Long Logic
+float retrace_floor      = nz(raw_lowest, low) + (clean_atr * Retrace_ATR_Buffer)
+bool is_long_retraced    = low <= retrace_floor
+bool candle_shifted_up   = close > open and close > ((open[1] + close[1]) / 2.0)
+bool bullish_body        = close > open and close > close[1]
+bool long_trend_confirm  = ta.barssince(close < open) >= Trend_Confirm_Bars
+
+bool sniperLongCondition = is_long_retraced and candle_shifted_up and institutional_volume
+bool trendLongCondition  = Use_Light_Trend_Mode and long_trend_confirm and bullish_body and institutional_volume
+bool longCondition       = (sniperLongCondition or trendLongCondition) and volatility_efficient and not daily_breach_hit and entry_allowed and long_add_ok and strong_body
+
+//----------------------------------------------------------------------------
+// EXECUTION ROUTING
+//----------------------------------------------------------------------------
+if longCondition
+    strategy.entry("Long", strategy.long)
+    last_entry_bar := bar_index
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    last_entry_bar := bar_index
+
+//----------------------------------------------------------------------------
+// PER-TRADE STATE: peak / valley, entry bar, and Tier-1 partial fill flag
+//----------------------------------------------------------------------------
+var float trade_peak_price   = 0.0
+var float trade_valley_price = 0.0
+var int   entry_bar_index    = na
+var bool  long_partial_hit   = false
+var bool  short_partial_hit  = false
+
+bool fresh_long  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+bool fresh_short = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if fresh_long
+    trade_peak_price   := high
+    entry_bar_index    := bar_index
+    long_partial_hit   := false
+    short_partial_hit  := false
+else if strategy.position_size > 0
+    trade_peak_price   := math.max(high, trade_peak_price)
+
+if fresh_short
+    trade_valley_price := low
+    entry_bar_index    := bar_index
+    long_partial_hit   := false
+    short_partial_hit  := false
+else if strategy.position_size < 0
+    trade_valley_price := math.min(low, trade_valley_price)
+
+if strategy.position_size == 0
+    entry_bar_index    := na
+    long_partial_hit   := false
+    short_partial_hit  := false
+
+//----------------------------------------------------------------------------
+// DYNAMIC VOLATILITY-BASED EXIT MATRIX
+//----------------------------------------------------------------------------
+float fill_price = strategy.position_avg_price
+
+// Initial static protections
+float long_initial_stop   = fill_price - (clean_atr * Storm_Cushion_Mult)
+float long_stop_size      = fill_price - long_initial_stop
+float long_partial_tp     = fill_price + (long_stop_size * Partial_TP_Ratio)
+
+float short_initial_stop  = fill_price + (clean_atr * Storm_Cushion_Mult)
+float short_stop_size     = short_initial_stop - fill_price
+float short_partial_tp    = fill_price - (short_stop_size * Partial_TP_Ratio)
+
+// Mark the Tier-1 partial as taken once price trades through its level. Once
+// taken, the runner's stop is floored at break-even so it can never round-trip
+// into a loss (the core fix for the losing 'Macro Run' legs in the logs).
+if strategy.position_size > 0 and high >= long_partial_tp
+    long_partial_hit := true
+if strategy.position_size < 0 and low <= short_partial_tp
+    short_partial_hit := true
+
+float long_be_stop  = fill_price + (clean_atr * BE_Buffer_ATR)
+float short_be_stop = fill_price - (clean_atr * BE_Buffer_ATR)
+
+// Dynamic Trailing Values for Runner Execution
+float dynamic_long_trail  = trade_peak_price - (clean_atr * Macro_Trail_Mult)
+float dynamic_short_trail = trade_valley_price + (clean_atr * Macro_Trail_Mult)
+
+// Persistent, MONOTONIC protective stops — they only ever ratchet toward profit,
+// never loosen, and reset to na when flat so each trade rebuilds from its entry.
+var float active_long_stop  = na
+var float active_short_stop = na
+
+int bars_in_trade = na(entry_bar_index) ? 0 : bar_index - entry_bar_index
+
+if strategy.position_size > 0 and not daily_breach_hit
+    float long_candidate = math.max(long_initial_stop, dynamic_long_trail)
+    if Use_BE_After_Partial and long_partial_hit
+        long_candidate := math.max(long_candidate, long_be_stop)
+    active_long_stop  := na(active_long_stop) ? long_candidate : math.max(active_long_stop, long_candidate)
+    active_short_stop := na
+
+    // Confirmed-candle loss cut: only on a CLOSED bar, only before Tier 1 is
+    // banked, only after the trade has had room to work, and only if the candle
+    // actually closed against us. Reads the whole candle before cancelling.
+    bool long_confirmed_cut = Use_Confirmed_Cut and barstate.isconfirmed and not long_partial_hit and bars_in_trade >= Max_Adverse_Bars and close < fill_price and close < open
+    if long_confirmed_cut
+        strategy.close("Long", comment="L Confirmed Cut")
+    else
+        strategy.exit("L Partial", "Long", qty_percent=Partial_Close_Pct, limit=long_partial_tp, stop=active_long_stop, comment="L Part")
+        strategy.exit("L Run", "Long", stop=active_long_stop, comment="L Macro Run")
+
+else if strategy.position_size < 0 and not daily_breach_hit
+    float short_candidate = math.min(short_initial_stop, dynamic_short_trail)
+    if Use_BE_After_Partial and short_partial_hit
+        short_candidate := math.min(short_candidate, short_be_stop)
+    active_short_stop := na(active_short_stop) ? short_candidate : math.min(active_short_stop, short_candidate)
+    active_long_stop  := na
+
+    bool short_confirmed_cut = Use_Confirmed_Cut and barstate.isconfirmed and not short_partial_hit and bars_in_trade >= Max_Adverse_Bars and close > fill_price and close > open
+    if short_confirmed_cut
+        strategy.close("Short", comment="S Confirmed Cut")
+    else
+        strategy.exit("S Partial", "Short", qty_percent=Partial_Close_Pct, limit=short_partial_tp, stop=active_short_stop, comment="S Part")
+        strategy.exit("S Run", "Short", stop=active_short_stop, comment="S Macro Run")
+
+else
+    active_long_stop  := na
+    active_short_stop := na
+
+//============================================================================
+// ON-CHART HUD  (display only — no effect on any trade decision)
+// A fixed corner panel: live trade block + session scorecard. It draws in a
+// table anchored to a chart corner, so it never plots lines across the price.
+//============================================================================
+hud_pos  = HUD_Where == "Top Left" ? position.top_left : HUD_Where == "Bottom Right" ? position.bottom_right : HUD_Where == "Bottom Left" ? position.bottom_left : position.top_right
+hud_txt  = HUD_Size == "Small" ? size.small : HUD_Size == "Large" ? size.large : size.normal
+
+var table hud = table.new(hud_pos, 2, 16, bgcolor=color.new(color.black, 12), frame_color=color.new(color.gray, 40), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
+
+f_row(int r, string k, string v, color vcol) =>
+    table.cell(hud, 0, r, k, text_color=color.silver, text_size=hud_txt, text_halign=text.align_left)
+    table.cell(hud, 1, r, v, text_color=vcol, text_size=hud_txt, text_halign=text.align_right)
+
+if Show_HUD and barstate.islast
+    bool   isLong  = strategy.position_size > 0
+    bool   isShort = strategy.position_size < 0
+    bool   flat    = strategy.position_size == 0
+    string dir     = isLong ? "LONG" : isShort ? "SHORT" : "FLAT"
+    color  dcol    = isLong ? color.lime : isShort ? color.red : color.gray
+    float  opnl    = strategy.openprofit
+    color  pcol    = opnl > 0 ? color.lime : opnl < 0 ? color.red : color.gray
+    int    durb    = na(entry_bar_index) ? 0 : bar_index - entry_bar_index
+    float  astop   = isLong ? active_long_stop : isShort ? active_short_stop : na
+    float  ntp     = isLong ? long_partial_tp : isShort ? short_partial_tp : na
+    bool   phit    = isLong ? long_partial_hit : isShort ? short_partial_hit : false
+    float  winr    = strategy.closedtrades > 0 ? 100.0 * strategy.wintrades / strategy.closedtrades : 0.0
+    float  pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0.0
+    float  expc    = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0.0
+    string flags   = (Entry_On_Bar_Close ? "Close✔" : "Close✘") + "  " + (Pyramid_Winners_Only ? "Pyr✔" : "Pyr✘") + "  " + (daily_breach_hit ? "⛔BREACH" : "Guard✔")
+
+    table.cell(hud, 0, 0, "G MONEY CORE · TRACK B", text_color=color.white, text_size=hud_txt, bgcolor=color.new(color.blue, 25), text_halign=text.align_left)
+    table.cell(hud, 1, 0, "v10.53", text_color=color.white, text_size=hud_txt, bgcolor=color.new(color.blue, 25), text_halign=text.align_right)
+    f_row(1,  "Position",        dir, dcol)
+    f_row(2,  "Entry",           flat ? "—" : str.tostring(strategy.position_avg_price, "#.##"), color.white)
+    f_row(3,  "Size (contracts)",str.tostring(strategy.position_size, "#.##"), color.white)
+    f_row(4,  "Open P&L (£)",    str.tostring(opnl, "#.##"), pcol)
+    f_row(5,  "Duration (bars)", flat ? "—" : str.tostring(durb), color.white)
+    f_row(6,  "Active stop",     na(astop) ? "—" : str.tostring(astop, "#.##"), color.white)
+    f_row(7,  "Next partial TP", na(ntp) ? "—" : str.tostring(ntp, "#.##"), color.white)
+    f_row(8,  "Tier-1 taken",    flat ? "—" : (phit ? "YES" : "no"), phit ? color.lime : color.silver)
+    table.cell(hud, 0, 9, "— SESSION —", text_color=color.aqua, text_size=hud_txt, text_halign=text.align_left)
+    table.cell(hud, 1, 9, "", text_size=hud_txt)
+    f_row(10, "Win %",           str.tostring(winr, "#.#") + "%  (" + str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.closedtrades) + ")", color.white)
+    f_row(11, "Profit Factor",   pf > 0 ? str.tostring(pf, "#.##") : "—", pf >= 1.5 ? color.lime : pf >= 1.0 ? color.yellow : color.red)
+    f_row(12, "Expectancy (£)",  str.tostring(expc, "#.##"), expc > 0 ? color.lime : color.red)
+    f_row(13, "Net P&L (£)",     str.tostring(strategy.netprofit, "#.##"), strategy.netprofit > 0 ? color.lime : color.red)
+    f_row(14, "Closed trades",   str.tostring(strategy.closedtrades), color.white)
+    f_row(15, "Flags",           flags, daily_breach_hit ? color.red : color.lime)
