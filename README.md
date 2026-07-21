@@ -49,6 +49,8 @@ The free channel is the proof layer — it exists so anyone can check the record
 | **2 — VIP launch** | Real-time signals for founding members — only once the record justifies charging. | |
 | **3 — Beyond** | Further tracks and instruments, each held to the same bar: frozen, validated, verified live. | |
 
+**Verification tooling.** The honest forward-test rig that every candidate must pass — correct risk-based sizing, real commission and slippage, no look-ahead, and a forward-locked window — is public: [`ForwardTest_Framework.pine`](ForwardTest_Framework.pine) ([how to use](ForwardTest_Framework_README.md)). It is the *instrument*, not a strategy: drop a signal in and it reports the truth, green or red. This is Phase 0's discipline made concrete — the strategy code stays private, the standard it's held to does not.
+
 ## The system behind it
 
 Built and run under four rules:
