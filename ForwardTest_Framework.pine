@@ -1,0 +1,96 @@
+//@version=6
+strategy("Forward-Test Risk Management Framework", overlay=true, calc_on_every_tick=false, process_orders_on_close=false, commission_type=strategy.commission.percent, commission_value=0.015, slippage=1)
+// An HONEST forward-test rig. Drop your own signal into section 4 and it reports the
+// truth: correct 1%-risk sizing, real commission/slippage, forward-locked window,
+// next-bar fills (no look-ahead), and a live Profit-Factor scorecard.
+// It does NOT create an edge -- it tells you honestly whether the signal you plug in has one.
+
+// ==========================================
+// 1. INPUTS & REAL-TIME PARAMETERS
+// ==========================================
+grp_risk     = "Risk & Position Sizing"
+accountEquity= input.float(10000.0, "Account Size ($)", group=grp_risk)
+riskPct      = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group=grp_risk) / 100
+rrRatio      = input.float(2.0, "Risk to Reward Ratio", minval=0.5, step=0.1, group=grp_risk)
+atrLen       = input.int(14, "ATR Lookback Period", group=grp_risk)
+atrMult      = input.float(1.5, "ATR Stop Multiplier", group=grp_risk)
+minQtyStep   = input.float(0.01, "Min Lot / Qty Step (live rounding)", minval=0.000001, group=grp_risk)
+
+grp_time     = "Forward Test Window"
+useDateFilter= input.bool(true, "Enable Forward Test Date Lock", group=grp_time)
+startDate    = input.time(timestamp("2026-01-01 00:00"), "Forward Test Start", group=grp_time)
+
+// ==========================================
+// 2. FORWARD-TEST LOCK (PREVENT HISTORICAL OVERFIT)
+// ==========================================
+inForwardTest = not useDateFilter or (time >= startDate)
+
+// ==========================================
+// 3. CORE CALCULATIONS & RISK METRICS
+// ==========================================
+atrVal    = ta.atr(atrLen)
+stopDist  = atrVal * atrMult
+riskAmount = accountEquity * riskPct
+
+// Size only when the stop is valid, then round to a real lot step.
+float qtyRaw  = (not na(stopDist) and stopDist > 0) ? riskAmount / stopDist : na
+float qtySize = na(qtyRaw) ? na : math.max(minQtyStep, math.floor(qtyRaw / minQtyStep) * minQtyStep)
+bool  riskOK  = inForwardTest and not na(qtySize) and qtySize > 0
+
+// ==========================================
+// 4. >>> PLUG YOUR SIGNAL IN HERE <<<
+//     Replace this EMA-crossover placeholder with your own real-time logic.
+//     It MUST be non-repainting (evaluate on confirmed bar closes only).
+// ==========================================
+fastEMA = ta.ema(close, 20)
+slowEMA = ta.ema(close, 50)
+longCondition  = ta.crossover(fastEMA, slowEMA)
+shortCondition = ta.crossunder(fastEMA, slowEMA)
+
+// ==========================================
+// 5. EXECUTION & ORDER MANAGEMENT
+// ==========================================
+var float longStop  = na
+var float longTP    = na
+var float shortStop = na
+var float shortTP   = na
+
+if (longCondition and riskOK and strategy.position_size == 0)
+    longStop := close - stopDist
+    longTP   := close + (stopDist * rrRatio)
+    strategy.entry("Long", strategy.long, qty=qtySize)
+    strategy.exit("Exit Long", "Long", stop=longStop, limit=longTP)
+
+if (shortCondition and riskOK and strategy.position_size == 0)
+    shortStop := close + stopDist
+    shortTP   := close - (stopDist * rrRatio)
+    strategy.entry("Short", strategy.short, qty=qtySize)
+    strategy.exit("Exit Short", "Short", stop=shortStop, limit=shortTP)
+
+// ==========================================
+// 6. VISUALIZATION & LIVE HONESTY DASHBOARD
+// ==========================================
+plot(fastEMA, color=color.blue,   title="Fast EMA")
+plot(slowEMA, color=color.orange, title="Slow EMA")
+
+float winRate = strategy.closedtrades > 0 ? 100.0 * strategy.wintrades / strategy.closedtrades : 0.0
+float profFac = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+
+var table dashboard = table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast
+    table.cell(dashboard, 0, 0, "Forward Test Mode", text_color=color.white, bgcolor=color.gray)
+    table.cell(dashboard, 1, 0, inForwardTest ? "ACTIVE" : "INACTIVE", text_color=color.white, bgcolor=inForwardTest ? color.green : color.red)
+    table.cell(dashboard, 0, 1, "Account Risk ($)", text_color=color.white)
+    table.cell(dashboard, 1, 1, str.tostring(riskAmount, "#.##"), text_color=color.yellow)
+    table.cell(dashboard, 0, 2, "Current ATR Stop", text_color=color.white)
+    table.cell(dashboard, 1, 2, str.tostring(stopDist, "#.##"), text_color=color.white)
+    table.cell(dashboard, 0, 3, "Position Size", text_color=color.white)
+    table.cell(dashboard, 1, 3, na(qtySize) ? "—" : str.tostring(qtySize, "#.####"), text_color=color.white)
+    table.cell(dashboard, 0, 4, "Closed Trades", text_color=color.white)
+    table.cell(dashboard, 1, 4, str.tostring(strategy.closedtrades), text_color=color.white)
+    table.cell(dashboard, 0, 5, "Win %", text_color=color.white)
+    table.cell(dashboard, 1, 5, str.tostring(winRate, "#.#") + "%", text_color=color.white)
+    table.cell(dashboard, 0, 6, "Profit Factor", text_color=color.white)
+    table.cell(dashboard, 1, 6, na(profFac) ? "—" : str.tostring(profFac, "#.##"), text_color=profFac >= 1.0 ? color.green : color.red)
+    table.cell(dashboard, 0, 7, "Net P&L ($)", text_color=color.white)
+    table.cell(dashboard, 1, 7, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.green : color.red)
