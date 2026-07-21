@@ -1,0 +1,117 @@
+//@version=6
+strategy("GMC MASS v2.1", overlay=true, initial_capital=5000, currency=currency.GBP, calc_on_every_tick=false, process_orders_on_close=false, commission_type=strategy.commission.percent, commission_value=0.015, slippage=1)
+// MASS-TRADE BASE. Fast EMA cross fires constantly (run on 5-MINUTE chart) so you
+// get maximum trades every day. Then WORK BACKWARDS: turn the filter dials up one
+// at a time (confirmation votes, cooldown, chop gate, session window) and keep the
+// ones that add equity. Everything OFF by default = raw trade population.
+// £5k GBP base lock, 1% risk, ATR stop+floor, real commission, next-bar fills.
+
+grp_risk     = "Risk & Position Sizing"
+accountEquity= input.float(5000.0, "Account Size (£) — LOCKED BASE", group=grp_risk)
+riskPct      = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group=grp_risk) / 100
+rrRatio      = input.float(2.0, "Risk to Reward Ratio", minval=0.5, step=0.1, group=grp_risk)
+atrLen       = input.int(14, "ATR Lookback Period", group=grp_risk)
+atrMult      = input.float(1.5, "ATR Stop Multiplier", group=grp_risk)
+minStopDist  = input.float(20.0, "Min Stop Distance (£) — caps over-sizing", minval=0.0, step=1.0, group=grp_risk)
+minQtyStep   = input.float(0.01, "Min Lot / Qty Step (live rounding)", minval=0.000001, group=grp_risk)
+
+grp_sig      = "Base Signal (mass trades)"
+fastLen      = input.int(9,  "Fast EMA (lower = more trades)", group=grp_sig)
+slowLen      = input.int(21, "Slow EMA", group=grp_sig)
+
+grp_filt     = "Filters — dial UP to work backwards"
+cooldownBars = input.int(0, "Cooldown bars (0=off, higher=fewer trades)", minval=0, group=grp_filt)
+useErGate    = input.bool(false, "Chop gate (skip ranging markets)", group=grp_filt)
+erLen        = input.int(14, "Efficiency Ratio Lookback", group=grp_filt)
+erMin        = input.float(0.30, "Min Efficiency Ratio", minval=0.0, maxval=1.0, step=0.05, group=grp_filt)
+minAgree     = input.int(0, "HTF confirmations required (0=off..3=strict)", minval=0, maxval=3, group=grp_filt)
+htfFast      = input.int(20, "HTF Confirm Fast EMA", group=grp_filt)
+htfSlow      = input.int(50, "HTF Confirm Slow EMA", group=grp_filt)
+tfA          = input.timeframe("30",  "Confirm TF 1", group=grp_filt)
+tfB          = input.timeframe("60",  "Confirm TF 2", group=grp_filt)
+tfC          = input.timeframe("240", "Confirm TF 3", group=grp_filt)
+useSession   = input.bool(false, "Restrict to session window", group=grp_filt)
+sess         = input.session("0000-2359", "Session window", group=grp_filt)
+tz           = input.string("GMT+0", "Session timezone", group=grp_filt)
+
+atrVal    = ta.atr(atrLen)
+stopDist  = math.max(atrVal * atrMult, minStopDist)
+riskAmount = accountEquity * riskPct
+float qtyRaw  = (not na(stopDist) and stopDist > 0) ? riskAmount / stopDist : na
+float qtySize = na(qtyRaw) ? na : math.max(minQtyStep, math.floor(qtyRaw / minQtyStep) * minQtyStep)
+bool  riskOK  = not na(qtySize) and qtySize > 0
+float commDragPct = stopDist > 0 ? (0.00015 * 2 * close / stopDist) * 100 : na
+
+htfTrend() =>
+    ta.ema(close, htfFast) > ta.ema(close, htfSlow) ? 1 : -1
+int dirA = request.security(syminfo.tickerid, tfA, htfTrend()[1], lookahead=barmerge.lookahead_off)
+int dirB = request.security(syminfo.tickerid, tfB, htfTrend()[1], lookahead=barmerge.lookahead_off)
+int dirC = request.security(syminfo.tickerid, tfC, htfTrend()[1], lookahead=barmerge.lookahead_off)
+f_up(d) => na(d) or d == 1
+f_dn(d) => na(d) or d == -1
+int longVotes  = (f_up(dirA) ? 1 : 0) + (f_up(dirB) ? 1 : 0) + (f_up(dirC) ? 1 : 0)
+int shortVotes = (f_dn(dirA) ? 1 : 0) + (f_dn(dirB) ? 1 : 0) + (f_dn(dirC) ? 1 : 0)
+bool stackLong  = minAgree <= 0 or longVotes  >= minAgree
+bool stackShort = minAgree <= 0 or shortVotes >= minAgree
+
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+bool trigLong  = ta.crossover(fastEMA, slowEMA)
+bool trigShort = ta.crossunder(fastEMA, slowEMA)
+
+float erChange = math.abs(close - close[erLen])
+float erVol    = math.sum(math.abs(close - close[1]), erLen)
+float effRatio = erVol > 0 ? erChange / erVol : 0.0
+bool  trending = not useErGate or effRatio >= erMin
+
+bool inSess = not useSession or not na(time(timeframe.period, sess, tz))
+
+var int lastEntryBar = na
+bool cooledDown = cooldownBars <= 0 or na(lastEntryBar) or (bar_index - lastEntryBar) >= cooldownBars
+
+bool longCondition  = trigLong  and stackLong  and trending and inSess and cooledDown
+bool shortCondition = trigShort and stackShort and trending and inSess and cooledDown
+
+var float longStop = na
+var float longTP   = na
+var float shortStop= na
+var float shortTP  = na
+
+if (longCondition and riskOK and strategy.position_size == 0)
+    longStop := close - stopDist
+    longTP   := close + (stopDist * rrRatio)
+    strategy.entry("Long", strategy.long, qty=qtySize)
+    strategy.exit("Exit Long", "Long", stop=longStop, limit=longTP)
+    lastEntryBar := bar_index
+
+if (shortCondition and riskOK and strategy.position_size == 0)
+    shortStop := close + stopDist
+    shortTP   := close - (stopDist * rrRatio)
+    strategy.entry("Short", strategy.short, qty=qtySize)
+    strategy.exit("Exit Short", "Short", stop=shortStop, limit=shortTP)
+    lastEntryBar := bar_index
+
+plot(fastEMA, color=color.blue,   title="Fast EMA")
+plot(slowEMA, color=color.orange, title="Slow EMA")
+
+float winRate = strategy.closedtrades > 0 ? 100.0 * strategy.wintrades / strategy.closedtrades : 0.0
+float profFac = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+
+var table dash = table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "Base Capital (£)", text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 1, 0, str.tostring(accountEquity, "#"), text_color=color.white, bgcolor=color.gray)
+    table.cell(dash, 0, 1, "Comm drag (% risk)", text_color=color.white)
+    table.cell(dash, 1, 1, na(commDragPct) ? "—" : str.tostring(commDragPct, "#.#") + "%", text_color=commDragPct <= 10 ? color.green : color.red)
+    table.cell(dash, 0, 2, "Closed Trades", text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(strategy.closedtrades), text_color=color.yellow)
+    table.cell(dash, 0, 3, "Win %", text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(winRate, "#.#") + "%", text_color=color.white)
+    table.cell(dash, 0, 4, "Profit Factor", text_color=color.white)
+    table.cell(dash, 1, 4, na(profFac) ? "—" : str.tostring(profFac, "#.##"), text_color=profFac >= 1.0 ? color.green : color.red)
+    table.cell(dash, 0, 5, "Net P&L (£)", text_color=color.white)
+    table.cell(dash, 1, 5, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.green : color.red)
+    table.cell(dash, 0, 6, "Cooldown / Votes", text_color=color.white)
+    table.cell(dash, 1, 6, str.tostring(cooldownBars) + " / " + str.tostring(minAgree), text_color=color.white)
+    table.cell(dash, 0, 7, "Chop / Session", text_color=color.white)
+    table.cell(dash, 1, 7, (useErGate ? "ON" : "off") + " / " + (useSession ? "ON" : "off"), text_color=color.white)
