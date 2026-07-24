@@ -7,10 +7,8 @@
 #property strict
 
 #include <Trade\Trade.mqh>
-#include <Trade\PositionInfo.mqh>
 
 CTrade        trade;
-CPositionInfo posInfo;
 
 //+------------------------------------------------------------------+
 // INPUTS
