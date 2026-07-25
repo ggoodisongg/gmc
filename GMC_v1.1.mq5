@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
-//|                    G MONEY CORE — GMC v1.0                      |
+//|                    G MONEY CORE — GMC v1.1                      |
 //|  ENTRY  = Sniper v9.5 confluence (MA/RSI/Vol/Wick + H4/H1 + casc)|
 //|  RISK   = Track B v3.33 engine (ATR stop, staged exits, safety)  |
+//|  v1.1   = adds live spread filter (skip entries in thin markets) |
 //|  Best-proven entry + best-proven risk management. Run on M5.     |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -15,7 +16,7 @@ CTrade trade;
 // INPUTS
 //==================================================================
 input group "--- EA Identity ---"
-input string EA_Name           = "GMC v1.0";
+input string EA_Name           = "GMC v1.1";
 input int    Magic_Number      = 10034;
 input int    Slippage_Points   = 20;
 
@@ -67,6 +68,10 @@ input double Partial_Close_Pct = 35.0;   // FROZEN: bank less, ride more
 input double Trail_Start_R     = 2.5;    // FROZEN
 input double Trail_R_Step      = 0.6;    // FROZEN: looser trail
 
+input group "--- Spread Filter ---"
+input bool   Use_Spread_Filter = true;
+input int    Max_Spread_Points = 50;    // XAUUSD points (0.01 each); skip entries above this
+
 input group "--- Session (GMT) & Safety ---"
 input bool   Use_Session_Filter= true;
 input int    Lon_Start         = 700;   // HHMM GMT
@@ -104,6 +109,15 @@ double AvgVol(){ double s=0; for(int i=1;i<=Vol_Period;i++) s+=(double)iVolume(_
 double AvgRange(){ double s=0; for(int i=1;i<=5;i++) s+=(iHigh(_Symbol,Signal_TF,i)-iLow(_Symbol,Signal_TF,i)); return s/5.0; }
 int    NowHHMM(){ MqlDateTime dt; TimeToStruct(TimeGMT(),dt); return dt.hour*100+dt.min; }
 bool   InR(int t,int a,int b){ return (t>=a && t<b); }
+
+bool SpreadOK()
+{
+   if(!Use_Spread_Filter) return true;
+   long sp=SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
+   if(sp<=Max_Spread_Points) return true;
+   Log("Entry skipped — spread "+IntegerToString((int)sp)+" pts > cap "+IntegerToString(Max_Spread_Points));
+   return false;
+}
 
 bool InSession()
 {
@@ -169,7 +183,7 @@ int OnInit()
    trade.SetMarginMode();
    daily_start_balance=AccountInfoDouble(ACCOUNT_BALANCE);
    daily_max_loss=daily_start_balance*(Daily_Max_Loss_Pct/100.0);
-   Log("v3.4 Hybrid ready (Sniper entry + Track B risk)");
+   Log("GMC v1.1 ready (Sniper entry + Track B risk + spread filter)");
    return INIT_SUCCEEDED;
 }
 
@@ -296,6 +310,7 @@ void OnTick()
    bool finalBuy =buySig || cascBuy;
    bool finalSell=sellSig || cascSell;
    if(!finalBuy && !finalSell) return;
+   if(!SpreadOK()) return;
 
    // ---- Track B execution ----
    double sl_pips=atr1*SL_ATR_Multiplier/pip;
@@ -307,13 +322,13 @@ void OnTick()
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
       double sl=e-P2Px(sl_pips), tp=e+P2Px(sl_pips*TP_Final_R);
-      if(trade.Buy(lot,_Symbol,e,sl,tp,"HYB LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | score "+IntegerToString(bull)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | score "+IntegerToString(bull)+" | lot "+DoubleToString(lot,2)); }
    }
    else if(finalSell)
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double sl=e+P2Px(sl_pips), tp=e-P2Px(sl_pips*TP_Final_R);
-      if(trade.Sell(lot,_Symbol,e,sl,tp,"HYB SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | score "+IntegerToString(bear)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | score "+IntegerToString(bear)+" | lot "+DoubleToString(lot,2)); }
    }
 }
 

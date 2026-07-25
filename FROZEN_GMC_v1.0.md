@@ -1,8 +1,22 @@
-# GMC v1.0 — the one strategy (frozen & validated)
+# GMC — the one strategy (frozen & validated)
 
-**This is the single, canonical strategy. One name, one number: `GMC v1.0`.**
-File: `GMC_v1.0.mq5`. Everything else in this repo is prior research and lives
+**This is the single, canonical strategy. Current version: `GMC v1.1`.**
+File: `GMC_v1.1.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
+
+## v1.1 (current) — adds the spread filter
+Layer 1 of the adaptive roadmap: skip any new entry while the live XAUUSD
+spread exceeds `Max_Spread_Points` (default 50 points = $0.50). Protects
+against rollover/news/thin-liquidity fills. Set `Use_Spread_Filter = false`
+to reproduce the exact frozen v1.0 baseline for A/B testing. All v1.0
+validated numbers below were produced WITHOUT the spread filter.
+
+Adaptive roadmap (one layer at a time, each must beat the frozen baseline
+out-of-sample or it comes out):
+1. Spread filter — DONE (v1.1, pending A/B validation)
+2. Score-tiered risk (bet more only when evidence stacks)
+3. ATR-percentile adaptive SL/TP
+4. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates
 + session + cascade) with a risk-managed engine (risk-% sizing, ATR stop with
