@@ -13,7 +13,7 @@ validated numbers below were produced WITHOUT the spread filter.
 
 Adaptive roadmap (one layer at a time, each must beat the frozen baseline
 out-of-sample or it comes out):
-1. Spread filter — DONE (v1.1, pending A/B validation)
+1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
 2. Score-tiered risk (bet more only when evidence stacks)
 3. ATR-percentile adaptive SL/TP
 4. Regime-aware exits + anti-martingale risk throttle
@@ -24,15 +24,20 @@ pip caps, staged exits: break-even -> partial -> trailing runner, daily-loss
 halt, consecutive-loss cooldown). Instrument: XAUUSD, M5.
 
 ## Validated results (XAUUSD M5, real ticks, £5,000)
-| Window | Profit Factor | Net | Max DD | Recovery | Data quality |
+**Verified baseline (2025-07, input-audited via full tester reports):**
+| Window | Profit Factor | Net | Max DD | Trades | Sharpe |
 |---|---|---|---|---|---|
-| Recent (2025-26) | 1.97 | +£1,633 | 5.8% | 3.83 | 99-100% |
-| 4 years (2022-26) | 1.40 | +£2,905 (+58%) | 11.65% | 4.20 | 99% |
-| ~11 years | 1.10 | +£2,062 (+41%) | 22.9% | 1.52 | 82% (gappy — least reliable) |
+| 2022.01 - 2026.07 | 1.24 | +£2,473 (+49%) | 17.2% | 545 | 2.50 |
 
-Trend-leaning: strongest in trending gold (~2.0), solidly positive over 4 years,
-never turns into a loser even over a decade. Stable across a range of settings
-(SL 1.5-2.0 all land ~1.4 / ~1.97) — a sign of a real edge, not curve-fit.
+A/B result: spread filter ON@50 vs OFF produced IDENTICAL results (545
+identical trades) — in-session historical spreads never exceeded 50 points.
+Filter kept ON as live insurance (news spikes / feed glitches); it costs
+nothing in backtest.
+
+Earlier recorded numbers (PF 1.40 / 11.65% DD 4yr; PF 1.97 recent; PF 1.10
+11yr) predate report-verified inputs and could NOT be reproduced once the
+tester's cached-input drift was discovered and fixed. They are retired.
+The table above is the only baseline any new layer must beat.
 
 ## Frozen settings (baked into GMC_v1.0.mq5 as defaults)
 - Risk_Percent 1.0 | Signal M5 | H4 + H1 gates on
