@@ -1,12 +1,14 @@
 //+------------------------------------------------------------------+
-//|                    G MONEY CORE — GMC v1.1                      |
+//|                    G MONEY CORE — GMC v1.2                      |
 //|  ENTRY  = Sniper v9.5 confluence (MA/RSI/Vol/Wick + H4/H1 + casc)|
 //|  RISK   = Track B v3.33 engine (ATR stop, staged exits, safety)  |
 //|  v1.1   = adds live spread filter (skip entries in thin markets) |
+//|  v1.2   = score-tiered risk: size scales with signal strength    |
+//|           (anti-martingale: weaker evidence = smaller bet)       |
 //|  Best-proven entry + best-proven risk management. Run on M5.     |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "1.10"
+#property version   "1.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -16,7 +18,7 @@ CTrade trade;
 // INPUTS
 //==================================================================
 input group "--- EA Identity ---"
-input string EA_Name           = "GMC v1.1";
+input string EA_Name           = "GMC v1.2";
 input int    Magic_Number      = 10034;
 input int    Slippage_Points   = 20;
 
@@ -24,6 +26,12 @@ input group "--- Risk & Lots (Track B engine) ---"
 input double Risk_Percent      = 1.0;
 input double Max_Lot_Size      = 0.20;
 input double Min_Lot_Size      = 0.01;
+
+input group "--- Score-Tiered Risk (v1.2 adaptive layer) ---"
+input bool   Use_Tiered_Risk   = true;   // false = exact v1.1 baseline
+input double Risk_Mult_Score6  = 1.00;   // perfect 6/6 confluence: full risk
+input double Risk_Mult_Score5  = 0.75;   // strong cascade entry
+input double Risk_Mult_Score4  = 0.50;   // minimum-evidence cascade entry
 
 input group "--- Execution / HTF ---"
 input ENUM_TIMEFRAMES Signal_TF = PERIOD_M5;   // run chart on this
@@ -133,11 +141,19 @@ bool SelectMyPosition()
    return false;
 }
 
-double CalcLots(double sl_pips, bool &valid)
+double TierMult(int score)
 {
-   valid=false; if(sl_pips<=0) return 0.0;
+   if(!Use_Tiered_Risk) return 1.0;
+   if(score>=6) return Risk_Mult_Score6;
+   if(score==5) return Risk_Mult_Score5;
+   return Risk_Mult_Score4;
+}
+
+double CalcLots(double sl_pips, double risk_mult, bool &valid)
+{
+   valid=false; if(sl_pips<=0||risk_mult<=0) return 0.0;
    double bal=AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk_amt=bal*Risk_Percent/100.0;
+   double risk_amt=bal*(Risk_Percent*risk_mult)/100.0;
    double tv=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
    double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
    double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
@@ -183,7 +199,7 @@ int OnInit()
    trade.SetMarginMode();
    daily_start_balance=AccountInfoDouble(ACCOUNT_BALANCE);
    daily_max_loss=daily_start_balance*(Daily_Max_Loss_Pct/100.0);
-   Log("GMC v1.1 ready (Sniper entry + Track B risk + spread filter)");
+   Log("GMC v1.2 ready (Sniper entry + Track B risk + spread filter + tiered risk)");
    return INIT_SUCCEEDED;
 }
 
@@ -312,23 +328,25 @@ void OnTick()
    if(!finalBuy && !finalSell) return;
    if(!SpreadOK()) return;
 
-   // ---- Track B execution ----
+   // ---- Track B execution (v1.2: risk tiered by entry score) ----
+   int    entryScore=finalBuy?bull:bear;
+   double rmult=TierMult(entryScore);
    double sl_pips=atr1*SL_ATR_Multiplier/pip;
    sl_pips=MathMax(Min_SL_Pips,MathMin(sl_pips,Max_SL_Pips));
-   bool valid=false; double lot=CalcLots(sl_pips,valid);
+   bool valid=false; double lot=CalcLots(sl_pips,rmult,valid);
    if(!valid||lot<Min_Lot_Size) return;
 
    if(finalBuy)
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
       double sl=e-P2Px(sl_pips), tp=e+P2Px(sl_pips*TP_Final_R);
-      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | score "+IntegerToString(bull)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | score "+IntegerToString(bull)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
    else if(finalSell)
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double sl=e+P2Px(sl_pips), tp=e-P2Px(sl_pips*TP_Final_R);
-      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | score "+IntegerToString(bear)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | score "+IntegerToString(bear)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
 }
 

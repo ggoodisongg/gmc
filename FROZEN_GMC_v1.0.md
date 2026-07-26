@@ -1,8 +1,17 @@
 # GMC — the one strategy (frozen & validated)
 
-**This is the single, canonical strategy. Current version: `GMC v1.1`.**
-File: `GMC_v1.1.mq5`. Everything else in this repo is prior research and lives
+**This is the single, canonical strategy. Current version: `GMC v1.2`.**
+File: `GMC_v1.2.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
+
+## v1.2 (current) — score-tiered risk (adaptive layer 2, IN TEST)
+Position size now scales with entry-signal strength: score 6/6 confluence
+risks the full 1.0%, cascade entries at score 5 risk 0.75x, minimum-evidence
+score-4 cascades risk 0.50x. Anti-martingale by construction — weaker
+evidence always means a smaller bet, never a bigger one. Same trades, same
+entries/exits as v1.1; only sizing changes. Set `Use_Tiered_Risk = false`
+to reproduce the exact v1.1/baseline behaviour for A/B testing.
+Status: pending A/B vs the verified baseline (must beat PF 1.24 / 17.2% DD).
 
 ## v1.1 (current) — adds the spread filter
 Layer 1 of the adaptive roadmap: skip any new entry while the live XAUUSD
@@ -14,7 +23,7 @@ validated numbers below were produced WITHOUT the spread filter.
 Adaptive roadmap (one layer at a time, each must beat the frozen baseline
 out-of-sample or it comes out):
 1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
-2. Score-tiered risk (bet more only when evidence stacks)
+2. Score-tiered risk — BUILT (v1.2, pending A/B validation)
 3. ATR-percentile adaptive SL/TP
 4. Regime-aware exits + anti-martingale risk throttle
 
