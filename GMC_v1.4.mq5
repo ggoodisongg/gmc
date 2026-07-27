@@ -73,8 +73,8 @@ input double ATR_Pct_High      = 70.0;    // at/above this percentile = volatile
 input double SL_Mult_LowVol    = 1.6;     // tighter stop when quiet
 input double SL_Mult_HighVol   = 2.6;     // wider stop when volatile
 
-input group "--- Signal-Type Sizing (v1.4 adaptive layer) ---"
-input bool   Use_Type_Sizing   = true;    // false = exact baseline (all entries full risk)
+input group "--- Signal-Type Sizing (v1.4 layer — A/B NO EFFECT, keep false) ---"
+input bool   Use_Type_Sizing   = false;   // A/B showed no effect: leave false
 input double Risk_Mult_Cascade = 1.00;    // cascade entries: the proven profit engine
 input double Risk_Mult_Confl   = 0.50;    // pure 6/6 confluence entries: the weaker subset
 

@@ -4,18 +4,26 @@
 File: `GMC_v1.4.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
 
-## v1.4 (current) — signal-type sizing: BUILT, pending A/B
-Direct product of the v1.2 finding, applied in reverse: cascade (momentum)
-entries — the proven profit engine — keep full 1% risk unchanged; pure 6/6
-confluence entries — the proven weaker subset — trade at 0.5x risk. An
-entry that fires both signals counts as cascade. Because cascade trades
-are untouched, this layer cannot gut the engine the way v1.2 did; it only
-trims exposure on the weak subset. `Use_Type_Sizing = false` reproduces
-the exact baseline. A/B protocol: run the SAME build twice on identical
-settings (M5, GBP 5,000, commissions on), once with the switch false
-(control) and once true — this removes the commission asymmetry that
-muddied the v1.3 comparison. Must beat the control on
-profit/PF/drawdown or it comes out.
+## v1.4 (current) — signal-type sizing: TESTED, NO EFFECT (switch stays OFF)
+Cascade entries keep full 1% risk; pure 6/6 confluence entries trade at
+0.5x. First fully clean A/B: SAME build run twice on identical settings
+(M5, 2022.01.01-2026.07.27, GBP 5,000, commissions on both). Result:
+OFF +£1,515.92 / PF 1.14 / 19.18% DD vs ON +£1,516.32 / PF 1.15 /
+19.22% DD — a 40p difference over 4.5 years. Pure noise; fails "beat
+the control or come out". **Canonical setting: Use_Type_Sizing = false.**
+
+KEY FINDING: trade-list comparison shows only a handful of trades ever
+changed size — pure 6/6 confluence entries (score 6 without the cascade
+condition also firing) are extremely rare. Nearly every entry GMC takes
+also satisfies the cascade condition, so GMC is in practice a CASCADE
+ENGINE. Any future layer keyed on confluence-vs-cascade type is dead on
+arrival: there is nothing to re-weight. This also finalises the v1.2
+finding.
+
+BONUS: the control run is the first true commissions-on baseline for the
+extended window: +£1,516 / PF 1.14 / 19.18% DD / 557 trades / Sharpe
+3.35 (commissions ~£255 over the test, 7% tick quality). Use it as the
+comparator for any future A/B run under identical conditions.
 
 ## v1.3 (current) — ATR-percentile adaptive SL: TESTED and REJECTED (switch stays OFF)
 Ranks the entry bar's ATR against the last 500 M5 ATR values. Quiet market
@@ -72,7 +80,7 @@ out-of-sample or it comes out):
 1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
 2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
 3. ATR-percentile adaptive SL/TP — TESTED & REJECTED (v1.3 A/B: PF 1.12 vs 1.17 matched control — switch stays OFF)
-4. Signal-type sizing (cascade full risk / confluence reduced) — BUILT (v1.4, pending A/B validation)
+4. Signal-type sizing (cascade full risk / confluence reduced) — TESTED, NO EFFECT (v1.4 clean A/B: 40p difference — switch stays OFF; pure-confluence entries are near-nonexistent)
 5. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates
