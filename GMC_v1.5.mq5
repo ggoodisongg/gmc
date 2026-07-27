@@ -1,17 +1,18 @@
 //+------------------------------------------------------------------+
-//|                    G MONEY CORE — GMC v1.4                      |
+//|                    G MONEY CORE — GMC v1.5                      |
 //|  ENTRY  = Sniper v9.5 confluence (MA/RSI/Vol/Wick + H4/H1 + casc)|
 //|  RISK   = Track B v3.33 engine (ATR stop, staged exits, safety)  |
 //|  v1.1   = adds live spread filter (skip entries in thin markets) |
 //|  v1.2   = score-tiered risk — A/B REJECTED, default OFF          |
 //|  v1.3   = ATR-percentile adaptive SL — A/B REJECTED, default OFF |
-//|  v1.4   = signal-type sizing: cascade entries keep full risk     |
-//|           (the proven profit engine); pure 6/6 confluence        |
-//|           entries trade at reduced risk (the weaker subset)      |
+//|  v1.4   = signal-type sizing — A/B NO EFFECT, default OFF        |
+//|  v1.5   = frequency boost: relaxes the cascade gates (min score, |
+//|           volume spike, momentum trigger, cooldowns) to trade    |
+//|           more often; must survive the same A/B as every layer   |
 //|  Best-proven entry + best-proven risk management. Run on M5.     |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "1.40"
+#property version   "1.50"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -21,7 +22,7 @@ CTrade trade;
 // INPUTS
 //==================================================================
 input group "--- EA Identity ---"
-input string EA_Name           = "GMC v1.4";
+input string EA_Name           = "GMC v1.5";
 input int    Magic_Number      = 10034;
 input int    Slippage_Points   = 20;
 
@@ -77,6 +78,14 @@ input group "--- Signal-Type Sizing (v1.4 layer — A/B NO EFFECT, keep false) -
 input bool   Use_Type_Sizing   = false;   // A/B showed no effect: leave false
 input double Risk_Mult_Cascade = 1.00;    // cascade entries: the proven profit engine
 input double Risk_Mult_Confl   = 0.50;    // pure 6/6 confluence entries: the weaker subset
+
+input group "--- Frequency Boost (v1.5 layer) ---"
+input bool   Use_Freq_Boost    = true;    // false = exact baseline gates (2-3 trades/week)
+input int    Freq_Casc_Score   = 3;       // cascade min score (frozen: 4)
+input double Freq_Casc_Vol     = 1.4;     // cascade volume spike multiple (frozen: 1.8)
+input double Freq_Casc_Pip1    = 6.0;     // cascade momentum trigger pips (frozen: 8.0)
+input int    Freq_Cooldown     = 1;       // bars between entries (frozen: 3)
+input int    Freq_Casc_Cool    = 1;       // bars between cascade entries (frozen: 3)
 
 input group "--- Stops & Targets (Track B) ---"
 input int    ATR_Period        = 14;
@@ -243,7 +252,7 @@ int OnInit()
    trade.SetMarginMode();
    daily_start_balance=AccountInfoDouble(ACCOUNT_BALANCE);
    daily_max_loss=daily_start_balance*(Daily_Max_Loss_Pct/100.0);
-   Log("GMC v1.4 ready (Sniper entry + Track B risk + spread filter + type sizing)");
+   Log("GMC v1.5 ready (Sniper entry + Track B risk + spread filter + freq boost)");
    return INIT_SUCCEEDED;
 }
 
@@ -353,19 +362,26 @@ void OnTick()
    bool bullConf=Use_Confirm_Bar?(c1>o1 && rsiUp):true;
    bool bearConf=Use_Confirm_Bar?(c1<o1 && rsiDn):true;
 
+   // v1.5: frequency boost swaps in relaxed cascade gates when enabled
+   int    eCascScore=Use_Freq_Boost?Freq_Casc_Score:Casc_Min_Score;
+   double eCascVol  =Use_Freq_Boost?Freq_Casc_Vol :Casc_Vol;
+   double eCascPip1 =Use_Freq_Boost?Freq_Casc_Pip1:Casc_Pip1;
+   int    eCool     =Use_Freq_Boost?Freq_Cooldown :Cooldown_Bars;
+   int    eCascCool =Use_Freq_Boost?Freq_Casc_Cool:Casc_Cooldown;
+
    bool sess=InSession();
-   bool cool=(bar_idx-last_entry_bar)>=Cooldown_Bars;
-   bool cascCool=(bar_idx-last_casc_bar)>=Casc_Cooldown;
+   bool cool=(bar_idx-last_entry_bar)>=eCool;
+   bool cascCool=(bar_idx-last_casc_bar)>=eCascCool;
 
    bool buySig =bullPerfect && bullConf && volaOk && sess && cool;
    bool sellSig=bearPerfect && bearConf && volaOk && sess && cool;
 
    // cascade
    double moveDn=(Hi(Casc_Bars,1)-c1)/pip, moveUp=(c1-Lo(Casc_Bars,1))/pip;
-   bool cVol=(double)iVolume(_Symbol,Signal_TF,1)>=av*Casc_Vol;
+   bool cVol=(double)iVolume(_Symbol,Signal_TF,1)>=av*eCascVol;
    bool cSize=rng>avgC*1.1;
-   bool cascSell=Use_Cascade && bear>=Casc_Min_Score && moveDn>=Casc_Pip1 && cVol && h4bear && h1bear && rsi1<50 && sess && cascCool && c1<ma1 && (moveDn>=Casc_Pip3 || cSize);
-   bool cascBuy =Use_Cascade && bull>=Casc_Min_Score && moveUp>=Casc_Pip1 && cVol && h4bull && h1bull && rsi1>50 && sess && cascCool && c1>ma1 && (moveUp>=Casc_Pip3 || cSize);
+   bool cascSell=Use_Cascade && bear>=eCascScore && moveDn>=eCascPip1 && cVol && h4bear && h1bear && rsi1<50 && sess && cascCool && c1<ma1 && (moveDn>=Casc_Pip3 || cSize);
+   bool cascBuy =Use_Cascade && bull>=eCascScore && moveUp>=eCascPip1 && cVol && h4bull && h1bull && rsi1>50 && sess && cascCool && c1>ma1 && (moveUp>=Casc_Pip3 || cSize);
 
    bool finalBuy =buySig || cascBuy;
    bool finalSell=sellSig || cascSell;

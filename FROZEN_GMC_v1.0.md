@@ -1,8 +1,21 @@
 # GMC — the one strategy (frozen & validated)
 
-**This is the single, canonical strategy. Current version: `GMC v1.4`.**
-File: `GMC_v1.4.mq5`. Everything else in this repo is prior research and lives
+**This is the single, canonical strategy. Current version: `GMC v1.5`.**
+File: `GMC_v1.5.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
+
+## v1.5 (current) — frequency boost: BUILT, pending A/B
+Owner asked for more than 2-3 trades/week. Since GMC is a cascade engine
+(v1.4 finding), the frequency levers are the cascade gates. Behind one
+switch (`Use_Freq_Boost`): cascade min score 4 -> 3, volume spike
+1.8x -> 1.4x, momentum trigger 8 -> 6 pips, both cooldowns 3 bars -> 1.
+`Use_Freq_Boost = false` reproduces the exact baseline. A/B protocol:
+same build, identical settings (M5, GBP 5,000, commissions on), run
+switch OFF (control) then ON. Pass bar: meaningfully more trades AND
+net profit >= control with DD not materially worse. HONEST WARNING
+recorded up front: relaxed gates admit trades the frozen filters
+rejected for a reason — expect lower per-trade quality; if profit
+degrades, the levers get dialed back or the layer comes out.
 
 ## v1.4 (current) — signal-type sizing: TESTED, NO EFFECT (switch stays OFF)
 Cascade entries keep full 1% risk; pure 6/6 confluence entries trade at
@@ -81,7 +94,8 @@ out-of-sample or it comes out):
 2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
 3. ATR-percentile adaptive SL/TP — TESTED & REJECTED (v1.3 A/B: PF 1.12 vs 1.17 matched control — switch stays OFF)
 4. Signal-type sizing (cascade full risk / confluence reduced) — TESTED, NO EFFECT (v1.4 clean A/B: 40p difference — switch stays OFF; pure-confluence entries are near-nonexistent)
-5. Regime-aware exits + anti-martingale risk throttle
+5. Frequency boost (relaxed cascade gates) — BUILT (v1.5, pending A/B validation)
+6. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates
 + session + cascade) with a risk-managed engine (risk-% sizing, ATR stop with
