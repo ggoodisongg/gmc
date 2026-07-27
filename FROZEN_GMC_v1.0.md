@@ -1,8 +1,17 @@
 # GMC — the one strategy (frozen & validated)
 
-**This is the single, canonical strategy. Current version: `GMC v1.2`.**
-File: `GMC_v1.2.mq5`. Everything else in this repo is prior research and lives
+**This is the single, canonical strategy. Current version: `GMC v1.3`.**
+File: `GMC_v1.3.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
+
+## v1.3 (current) — ATR-percentile adaptive SL: BUILT, pending A/B
+Ranks the entry bar's ATR against the last 500 M5 ATR values. Quiet market
+(<=30th percentile) -> SL 1.6x ATR; volatile (>=70th) -> 2.6x ATR; else the
+frozen 2.0x. Cash risk stays 1% (lots re-size to the stop); all targets are
+in R so they scale with the stop. `Use_Adaptive_SL = false` reproduces the
+exact baseline. `Use_Tiered_Risk` default is now false (rejected layer).
+Must beat PF 1.24 / +£2,473 / 17.2% DD (2022.01.01-2026.07.01, M5 chart)
+or it comes out.
 
 ## v1.2 (current) — score-tiered risk: TESTED and REJECTED (switch stays OFF)
 A/B result (2022-2026, XAUUSD, near-identical trade list to baseline):
@@ -38,7 +47,7 @@ Adaptive roadmap (one layer at a time, each must beat the frozen baseline
 out-of-sample or it comes out):
 1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
 2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
-3. ATR-percentile adaptive SL/TP
+3. ATR-percentile adaptive SL/TP — BUILT (v1.3, pending A/B validation)
 4. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates
