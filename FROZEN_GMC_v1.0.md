@@ -4,14 +4,25 @@
 File: `GMC_v1.3.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
 
-## v1.3 (current) — ATR-percentile adaptive SL: BUILT, pending A/B
+## v1.3 (current) — ATR-percentile adaptive SL: TESTED and REJECTED (switch stays OFF)
 Ranks the entry bar's ATR against the last 500 M5 ATR values. Quiet market
 (<=30th percentile) -> SL 1.6x ATR; volatile (>=70th) -> 2.6x ATR; else the
 frozen 2.0x. Cash risk stays 1% (lots re-size to the stop); all targets are
 in R so they scale with the stop. `Use_Adaptive_SL = false` reproduces the
 exact baseline. `Use_Tiered_Risk` default is now false (rejected layer).
-Must beat PF 1.24 / +£2,473 / 17.2% DD (2022.01.01-2026.07.01, M5 chart)
-or it comes out.
+
+A/B result (XAUUSD M5, 2022.01.01-2026.07.27, GBP 5,000, 7% real-tick
+quality on both runs): adaptive ON +£1,224 / PF 1.12 / 19.06% DD / 555
+trades vs matched-conditions baseline OFF +£1,707 / PF 1.17 / 17.94% DD /
+557 trades. Caveat noted honestly: the ON run charged commissions
+(-£246.06) while the OFF control accidentally ran in "profit in pips"
+mode with zero commissions — but even crediting the full £246 back
+(~£1,470), adaptive SL still trails on profit, PF and drawdown, so the
+rejection stands on every metric. Fails "beat the baseline or come out".
+**Canonical setting: Use_Adaptive_SL = false** (exact baseline behaviour).
+The code stays in the file, switched off. Both runs were at 7% tick
+quality (comparable to each other, not to the 99% canonical baseline);
+re-download tick history before future A/Bs.
 
 ## v1.2 (current) — score-tiered risk: TESTED and REJECTED (switch stays OFF)
 A/B result (2022-2026, XAUUSD, near-identical trade list to baseline):
@@ -47,7 +58,7 @@ Adaptive roadmap (one layer at a time, each must beat the frozen baseline
 out-of-sample or it comes out):
 1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
 2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
-3. ATR-percentile adaptive SL/TP — BUILT (v1.3, pending A/B validation)
+3. ATR-percentile adaptive SL/TP — TESTED & REJECTED (v1.3 A/B: PF 1.12 vs 1.17 matched control — switch stays OFF)
 4. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates

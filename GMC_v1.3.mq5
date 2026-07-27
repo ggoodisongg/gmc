@@ -64,8 +64,8 @@ input double Casc_Vol          = 1.8;
 input int    Casc_Cooldown     = 3;
 input int    Casc_Min_Score    = 4;
 
-input group "--- ATR-Percentile Adaptive SL (v1.3 adaptive layer) ---"
-input bool   Use_Adaptive_SL   = true;    // false = exact baseline (fixed 2.0x ATR stop)
+input group "--- ATR-Percentile Adaptive SL (v1.3 layer — A/B REJECTED, keep false) ---"
+input bool   Use_Adaptive_SL   = false;   // REJECTED in A/B: leave false (fixed 2.0x ATR stop)
 input int    ATR_Pct_Lookback  = 500;     // Signal_TF bars of ATR history to rank against
 input double ATR_Pct_Low       = 30.0;    // at/below this percentile = quiet market
 input double ATR_Pct_High      = 70.0;    // at/above this percentile = volatile market
