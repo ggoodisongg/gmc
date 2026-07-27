@@ -18,6 +18,15 @@ are the weaker ones. Confluence score is NOT a good per-trade quality
 proxy. Any future sizing layer should key on signal TYPE (cascade vs
 confluence), tested with the same A/B discipline.
 
+Matched-conditions control run (tiered OFF, same H1 chart + extended dates
+2022.01.01-2026.07.27 as the ON run): +£1,553 / PF 1.15 / 19.2% DD / 558
+trades vs ON +£599 / PF 1.09 — rejection confirmed apples-to-apples (~3x
+profit from switching it off). Note: control differs from the canonical
+baseline (PF 1.24 / +£2,473 to 2026.07.01) mainly because the extra July
+2026 weeks lost ~£425 (worst losing stretch in the test, incl. 15 consec
+losses). Canonical baseline window stays 2022.01.01-2026.07.01 on an M5
+chart for all future A/Bs.
+
 ## v1.1 (current) — adds the spread filter
 Layer 1 of the adaptive roadmap: skip any new entry while the live XAUUSD
 spread exceeds `Max_Spread_Points` (default 50 points = $0.50). Protects
