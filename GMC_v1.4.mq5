@@ -1,16 +1,17 @@
 //+------------------------------------------------------------------+
-//|                    G MONEY CORE — GMC v1.3                      |
+//|                    G MONEY CORE — GMC v1.4                      |
 //|  ENTRY  = Sniper v9.5 confluence (MA/RSI/Vol/Wick + H4/H1 + casc)|
 //|  RISK   = Track B v3.33 engine (ATR stop, staged exits, safety)  |
 //|  v1.1   = adds live spread filter (skip entries in thin markets) |
 //|  v1.2   = score-tiered risk — A/B REJECTED, default OFF          |
-//|  v1.3   = ATR-percentile adaptive SL: stop width scales with     |
-//|           current volatility rank (quiet=tight, wild=wide);      |
-//|           cash risk per trade stays constant at Risk_Percent     |
+//|  v1.3   = ATR-percentile adaptive SL — A/B REJECTED, default OFF |
+//|  v1.4   = signal-type sizing: cascade entries keep full risk     |
+//|           (the proven profit engine); pure 6/6 confluence        |
+//|           entries trade at reduced risk (the weaker subset)      |
 //|  Best-proven entry + best-proven risk management. Run on M5.     |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "1.30"
+#property version   "1.40"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -20,7 +21,7 @@ CTrade trade;
 // INPUTS
 //==================================================================
 input group "--- EA Identity ---"
-input string EA_Name           = "GMC v1.3";
+input string EA_Name           = "GMC v1.4";
 input int    Magic_Number      = 10034;
 input int    Slippage_Points   = 20;
 
@@ -71,6 +72,11 @@ input double ATR_Pct_Low       = 30.0;    // at/below this percentile = quiet ma
 input double ATR_Pct_High      = 70.0;    // at/above this percentile = volatile market
 input double SL_Mult_LowVol    = 1.6;     // tighter stop when quiet
 input double SL_Mult_HighVol   = 2.6;     // wider stop when volatile
+
+input group "--- Signal-Type Sizing (v1.4 adaptive layer) ---"
+input bool   Use_Type_Sizing   = true;    // false = exact baseline (all entries full risk)
+input double Risk_Mult_Cascade = 1.00;    // cascade entries: the proven profit engine
+input double Risk_Mult_Confl   = 0.50;    // pure 6/6 confluence entries: the weaker subset
 
 input group "--- Stops & Targets (Track B) ---"
 input int    ATR_Period        = 14;
@@ -159,6 +165,16 @@ double TierMult(int score)
    return Risk_Mult_Score4;
 }
 
+// v1.4: size by signal TYPE. The v1.2 A/B proved cascade (momentum) entries
+// are the profitable subset and 6/6 confluence entries the weaker one, so
+// cascade keeps full risk and pure-confluence risk is reduced. An entry
+// that fires both signals counts as cascade (momentum evidence present).
+double TypeMult(bool is_cascade)
+{
+   if(!Use_Type_Sizing) return 1.0;
+   return is_cascade ? Risk_Mult_Cascade : Risk_Mult_Confl;
+}
+
 // v1.3: rank last-closed-bar ATR against recent ATR history and pick the
 // stop multiplier for the current volatility regime. Falls back to the
 // frozen baseline multiplier if the switch is off or history is short.
@@ -227,7 +243,7 @@ int OnInit()
    trade.SetMarginMode();
    daily_start_balance=AccountInfoDouble(ACCOUNT_BALANCE);
    daily_max_loss=daily_start_balance*(Daily_Max_Loss_Pct/100.0);
-   Log("GMC v1.3 ready (Sniper entry + Track B risk + spread filter + adaptive SL)");
+   Log("GMC v1.4 ready (Sniper entry + Track B risk + spread filter + type sizing)");
    return INIT_SUCCEEDED;
 }
 
@@ -356,9 +372,10 @@ void OnTick()
    if(!finalBuy && !finalSell) return;
    if(!SpreadOK()) return;
 
-   // ---- Track B execution (v1.3: SL width adapts to volatility rank) ----
+   // ---- Track B execution (v1.4: risk sized by signal type) ----
    int    entryScore=finalBuy?bull:bear;
-   double rmult=TierMult(entryScore);
+   bool   isCasc=finalBuy?cascBuy:cascSell;
+   double rmult=TierMult(entryScore)*TypeMult(isCasc);
    double slmult=AdaptiveSLMult();
    double sl_pips=atr1*slmult/pip;
    sl_pips=MathMax(Min_SL_Pips,MathMin(sl_pips,Max_SL_Pips));
@@ -369,13 +386,13 @@ void OnTick()
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
       double sl=e-P2Px(sl_pips), tp=e+P2Px(sl_pips*TP_Final_R);
-      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | score "+IntegerToString(bull)+" | slx"+DoubleToString(slmult,2)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bull)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
    else if(finalSell)
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double sl=e+P2Px(sl_pips), tp=e-P2Px(sl_pips*TP_Final_R);
-      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | score "+IntegerToString(bear)+" | slx"+DoubleToString(slmult,2)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bear)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
 }
 
