@@ -4,14 +4,19 @@
 File: `GMC_v1.2.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
 
-## v1.2 (current) — score-tiered risk (adaptive layer 2, IN TEST)
-Position size now scales with entry-signal strength: score 6/6 confluence
-risks the full 1.0%, cascade entries at score 5 risk 0.75x, minimum-evidence
-score-4 cascades risk 0.50x. Anti-martingale by construction — weaker
-evidence always means a smaller bet, never a bigger one. Same trades, same
-entries/exits as v1.1; only sizing changes. Set `Use_Tiered_Risk = false`
-to reproduce the exact v1.1/baseline behaviour for A/B testing.
-Status: pending A/B vs the verified baseline (must beat PF 1.24 / 17.2% DD).
+## v1.2 (current) — score-tiered risk: TESTED and REJECTED (switch stays OFF)
+A/B result (2022-2026, XAUUSD, near-identical trade list to baseline):
+tiered ON gave +£599 / PF 1.09 / 12.4% DD vs baseline +£2,473 / PF 1.24 /
+17.2% DD. Drawdown improved but profit collapsed ~75% — fails the rule
+"beat the baseline or come out". **Canonical setting: Use_Tiered_Risk = false**
+(exact v1.1 behaviour). The code stays in the file, switched off.
+
+KEY FINDING from the failure: down-weighting score-4/5 entries gutted the
+profit, which proves the cascade (momentum) entries at score 4-5 are the
+strategy's most profitable subset — the "perfect 6/6" confluence entries
+are the weaker ones. Confluence score is NOT a good per-trade quality
+proxy. Any future sizing layer should key on signal TYPE (cascade vs
+confluence), tested with the same A/B discipline.
 
 ## v1.1 (current) — adds the spread filter
 Layer 1 of the adaptive roadmap: skip any new entry while the live XAUUSD
@@ -23,7 +28,7 @@ validated numbers below were produced WITHOUT the spread filter.
 Adaptive roadmap (one layer at a time, each must beat the frozen baseline
 out-of-sample or it comes out):
 1. Spread filter — DONE (v1.1, A/B validated: zero backtest impact, kept as live insurance)
-2. Score-tiered risk — BUILT (v1.2, pending A/B validation)
+2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
 3. ATR-percentile adaptive SL/TP
 4. Regime-aware exits + anti-martingale risk throttle
 
