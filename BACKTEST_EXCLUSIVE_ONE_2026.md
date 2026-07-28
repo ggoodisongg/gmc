@@ -142,6 +142,10 @@ both must clear PF 1.0 on **2026 and 2022** to count:
    TP1/locks/runner intact. This is the mechanism identified in §4 and it is a
    single input. If winners stop being capped at +0.33R, the required win rate
    falls sharply.
+   > **Tested — failed.** PF 0.73, −£581.10. The required win rate did fall
+   > sharply (45.57% → 39.26%) and the actual win rate fell almost as much
+   > (38.41% → 32.65%), so the P/L moved £4 on a £585 loss. §4 named a symptom,
+   > not the mechanism. See [`BACKTEST_EXCLUSIVE_ONE_2026_TEST1.md`](BACKTEST_EXCLUSIVE_ONE_2026_TEST1.md).
 2. **Longs only.** `InpSellsEnabled = false`. Shorts win 33.88% vs longs 41.15% — a
    7-point gap across 242 vs 401 trades. Worth one test; be aware Jan–Jul 2026 gold
    trended up, so a longs-only result that only works in 2026 is a curve fit.
