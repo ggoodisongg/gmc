@@ -1,18 +1,20 @@
 //+------------------------------------------------------------------+
-//|                    G MONEY CORE — GMC v1.5                      |
+//|                    G MONEY CORE — GMC v1.6                      |
 //|  ENTRY  = Sniper v9.5 confluence (MA/RSI/Vol/Wick + H4/H1 + casc)|
 //|  RISK   = Track B v3.33 engine (ATR stop, staged exits, safety)  |
 //|  v1.1   = adds live spread filter (skip entries in thin markets) |
 //|  v1.2   = score-tiered risk — A/B REJECTED, default OFF          |
 //|  v1.3   = ATR-percentile adaptive SL — A/B REJECTED, default OFF |
 //|  v1.4   = signal-type sizing — A/B NO EFFECT, default OFF        |
-//|  v1.5   = frequency boost: relaxes the cascade gates (min score, |
-//|           volume spike, momentum trigger, cooldowns) to trade    |
-//|           more often; must survive the same A/B as every layer   |
+//|  v1.5   = frequency boost — A/B REJECTED, default OFF            |
+//|  v1.6   = symbol autoscale: every gold-specific pip constant is  |
+//|           re-derived from the traded symbol's own daily ATR, so  |
+//|           the same proven gates can run on silver, FX and index  |
+//|           charts. OFF reproduces the exact XAUUSD baseline.      |
 //|  Best-proven entry + best-proven risk management. Run on M5.     |
 //+------------------------------------------------------------------+
 #property copyright "G Money Systems"
-#property version   "1.50"
+#property version   "1.60"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -22,7 +24,7 @@ CTrade trade;
 // INPUTS
 //==================================================================
 input group "--- EA Identity ---"
-input string EA_Name           = "GMC v1.5";
+input string EA_Name           = "GMC v1.6";
 input int    Magic_Number      = 10034;
 input int    Slippage_Points   = 20;
 
@@ -87,6 +89,23 @@ input double Freq_Casc_Pip1    = 6.0;     // cascade momentum trigger pips (froz
 input int    Freq_Cooldown     = 1;       // bars between entries (frozen: 3)
 input int    Freq_Casc_Cool    = 1;       // bars between cascade entries (frozen: 3)
 
+// v1.6: every constant below this line that was tuned in XAUUSD pips gets
+// re-derived from the traded symbol's own D1 ATR when autoscale is ON. The
+// multipliers are calibrated so gold reproduces its frozen values closely;
+// they are NOT exact, so gold itself should keep running with the switch OFF.
+input group "--- Multi-Symbol Autoscale (v1.6 layer) ---"
+input bool   Use_Symbol_Autoscale = false;  // false = exact frozen XAUUSD baseline
+input double Auto_MinSL_D1     = 0.250;  // min stop cap     = x D1 ATR (gold frozen: 70 pips)
+input double Auto_MaxSL_D1     = 1.350;  // max stop cap     = x D1 ATR (gold frozen: 380 pips)
+input double Auto_Vola_D1      = 0.210;  // 10-bar range cap = x D1 ATR (gold frozen: 60 pips)
+input double Auto_Casc1_D1     = 0.030;  // cascade trigger  = x D1 ATR (gold frozen: 8 pips)
+input double Auto_Casc3_D1     = 0.090;  // cascade strong   = x D1 ATR (gold frozen: 25 pips)
+input double Auto_Spread_D1    = 0.020;  // spread cap       = x D1 ATR (gold frozen: 50 pts)
+input double Auto_Max_Notional = 12.0;   // max position notional as a multiple of balance
+
+input group "--- Portfolio Safety (v1.6, across all charts) ---"
+input int    Max_Open_Positions = 3;     // total GMC positions across every symbol (0 = no cap)
+
 input group "--- Stops & Targets (Track B) ---"
 input int    ATR_Period        = 14;
 input double SL_ATR_Multiplier = 2.0;    // FROZEN
@@ -119,7 +138,10 @@ input int    Cooldown_Mins     = 30;
 // GLOBALS
 //==================================================================
 double   pip;
-int      hMA, hRSI, hATR, hH4, hH1;
+int      hMA, hRSI, hATR, hH4, hH1, hATRD1;
+// v1.6 effective (symbol-scaled) values — identical to the inputs when autoscale is OFF
+double   g_minsl, g_maxsl, g_vola, g_casc1, g_casc3, g_maxlot;
+int      g_spread_pts;
 datetime last_bar_time = 0;
 int      bar_idx = 0, last_entry_bar = -100000, last_casc_bar = -100000;
 double   daily_start_balance = 0.0, daily_max_loss = 0.0;
@@ -143,12 +165,64 @@ double AvgRange(){ double s=0; for(int i=1;i<=5;i++) s+=(iHigh(_Symbol,Signal_TF
 int    NowHHMM(){ MqlDateTime dt; TimeToStruct(TimeGMT(),dt); return dt.hour*100+dt.min; }
 bool   InR(int t,int a,int b){ return (t>=a && t<b); }
 
+// v1.6: re-derive every XAUUSD-tuned pip constant from the traded symbol's own
+// daily ATR. Called on each new signal bar so the scale tracks the market as
+// volatility changes over a long backtest. With the switch OFF this is a
+// straight copy of the inputs, so gold behaviour is bit-for-bit the baseline.
+void RefreshSymbolScale()
+{
+   g_minsl=Min_SL_Pips;  g_maxsl=Max_SL_Pips;  g_vola=Vola_Dist_Pips;
+   g_casc1=Casc_Pip1;    g_casc3=Casc_Pip3;    g_maxlot=Max_Lot_Size;
+   g_spread_pts=Max_Spread_Points;
+   if(!Use_Symbol_Autoscale) return;
+
+   double a[];
+   if(CopyBuffer(hATRD1,0,1,1,a)<=0 || a[0]<=0) return;   // keep frozen values until D1 ATR is ready
+   double Dp=a[0]/pip;                                     // one day's range, in this symbol's pips
+
+   g_minsl=Dp*Auto_MinSL_D1;
+   g_maxsl=Dp*Auto_MaxSL_D1;
+   g_vola =Dp*Auto_Vola_D1;
+   g_casc1=Dp*Auto_Casc1_D1;
+   g_casc3=Dp*Auto_Casc3_D1;
+
+   double pt=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   if(pt>0) g_spread_pts=(int)MathMax(1,MathRound(Dp*Auto_Spread_D1*pip/pt));
+
+   // Exposure cap: a rough notional ceiling, not a precise one — balance is in
+   // the deposit currency while contract value is in the quote currency, so on
+   // a cross-currency symbol this is approximate. It exists to stop a low-priced
+   // instrument from producing an absurd lot, not to fine-tune risk.
+   double cs=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_CONTRACT_SIZE);
+   double px=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(cs>0 && px>0 && step>0)
+   {
+      double lots=(AccountInfoDouble(ACCOUNT_BALANCE)*Auto_Max_Notional)/(cs*px);
+      lots=MathFloor(lots/step)*step;
+      g_maxlot=NormalizeDouble(MathMax(Min_Lot_Size,lots),2);
+   }
+}
+
+// v1.6: count GMC positions on EVERY symbol, so several charts running the same
+// magic cannot stack unlimited simultaneous risk on one account.
+int MyPositionsAll()
+{
+   int n=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(PositionSelectByTicket(tk) && PositionGetInteger(POSITION_MAGIC)==Magic_Number) n++;
+   }
+   return n;
+}
+
 bool SpreadOK()
 {
    if(!Use_Spread_Filter) return true;
    long sp=SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
-   if(sp<=Max_Spread_Points) return true;
-   Log("Entry skipped — spread "+IntegerToString((int)sp)+" pts > cap "+IntegerToString(Max_Spread_Points));
+   if(sp<=g_spread_pts) return true;
+   Log("Entry skipped — spread "+IntegerToString((int)sp)+" pts > cap "+IntegerToString(g_spread_pts));
    return false;
 }
 
@@ -216,7 +290,7 @@ double CalcLots(double sl_pips, double risk_mult, bool &valid)
    double lot=risk_amt/risk_per_lot;
    lot=NormalizeDouble(MathFloor(lot/step)*step,2);
    if(lot<Min_Lot_Size) lot=Min_Lot_Size;
-   if(lot>Max_Lot_Size) lot=Max_Lot_Size;
+   if(lot>g_maxlot)     lot=g_maxlot;
    valid=true; return lot;
 }
 
@@ -238,28 +312,34 @@ bool SafetyChecks()
 int OnInit()
 {
    pip=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   int dg=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
    if(StringFind(_Symbol,"XAU")>=0 || StringFind(_Symbol,"GOLD")>=0) pip*=10;
+   else if(Use_Symbol_Autoscale && (dg==3 || dg==5)) pip*=10;   // 5-digit FX / 3-digit JPY
    hMA = iMA(_Symbol, Signal_TF, MA_Period, 0, MODE_SMA, PRICE_CLOSE);
    hRSI= iRSI(_Symbol, Signal_TF, RSI_Period, PRICE_CLOSE);
    hATR= iATR(_Symbol, Signal_TF, ATR_Period);
    hH4 = iMA(_Symbol, PERIOD_H4, 50, 0, MODE_SMA, PRICE_CLOSE);
    hH1 = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_SMA, PRICE_CLOSE);
-   if(hMA==INVALID_HANDLE||hRSI==INVALID_HANDLE||hATR==INVALID_HANDLE||hH4==INVALID_HANDLE||hH1==INVALID_HANDLE)
+   hATRD1 = iATR(_Symbol, PERIOD_D1, ATR_Period);
+   if(hMA==INVALID_HANDLE||hRSI==INVALID_HANDLE||hATR==INVALID_HANDLE||hH4==INVALID_HANDLE||hH1==INVALID_HANDLE||hATRD1==INVALID_HANDLE)
    { Log("Indicator init failed"); return INIT_FAILED; }
+   RefreshSymbolScale();
    trade.SetExpertMagicNumber(Magic_Number);
    trade.SetDeviationInPoints(Slippage_Points);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetMarginMode();
    daily_start_balance=AccountInfoDouble(ACCOUNT_BALANCE);
    daily_max_loss=daily_start_balance*(Daily_Max_Loss_Pct/100.0);
-   Log("GMC v1.5 ready (Sniper entry + Track B risk + spread filter + freq boost)");
+   Log("GMC v1.6 ready on "+_Symbol+" | autoscale "+(Use_Symbol_Autoscale?"ON":"OFF")+
+       " | pip "+DoubleToString(pip,5)+" | SL caps "+DoubleToString(g_minsl,1)+"-"+DoubleToString(g_maxsl,1)+
+       " pips | spread cap "+IntegerToString(g_spread_pts)+" pts | max lot "+DoubleToString(g_maxlot,2));
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int r)
 {
    IndicatorRelease(hMA); IndicatorRelease(hRSI); IndicatorRelease(hATR);
-   IndicatorRelease(hH4); IndicatorRelease(hH1);
+   IndicatorRelease(hH4); IndicatorRelease(hH1); IndicatorRelease(hATRD1);
 }
 
 //==================================================================
@@ -318,6 +398,10 @@ void OnTick()
    datetime cb=iTime(_Symbol,Signal_TF,0);
    if(cb==last_bar_time) return;
    last_bar_time=cb; bar_idx++;
+   RefreshSymbolScale();
+
+   // v1.6: account-wide concurrency cap (only bites when several charts run GMC)
+   if(Max_Open_Positions>0 && MyPositionsAll()>=Max_Open_Positions) return;
 
    double atr1=Bf(hATR,1); if(atr1==EMPTY_VALUE||atr1<=0) return;
    double c1=iClose(_Symbol,Signal_TF,1), o1=iOpen(_Symbol,Signal_TF,1), h1=iHigh(_Symbol,Signal_TF,1), l1=iLow(_Symbol,Signal_TF,1);
@@ -353,7 +437,7 @@ void OnTick()
    bool rsiUp=rsi1>rsi2 && rsi2>rsi3;
    bool rsiDn=rsi1<rsi2 && rsi2<rsi3;
 
-   bool volaOk=((Hi(10,1)-Lo(10,1))/pip)<=Vola_Dist_Pips;
+   bool volaOk=((Hi(10,1)-Lo(10,1))/pip)<=g_vola;
 
    // scores
    int bull=(tBuy?1:0)+(bullRej?1:0)+(volOk?1:0)+(rsiBull?1:0)+(slopeUp?1:0)+((h4bull&&h1bull)?1:0);
@@ -365,7 +449,7 @@ void OnTick()
    // v1.5: frequency boost swaps in relaxed cascade gates when enabled
    int    eCascScore=Use_Freq_Boost?Freq_Casc_Score:Casc_Min_Score;
    double eCascVol  =Use_Freq_Boost?Freq_Casc_Vol :Casc_Vol;
-   double eCascPip1 =Use_Freq_Boost?Freq_Casc_Pip1:Casc_Pip1;
+   double eCascPip1 =Use_Freq_Boost?Freq_Casc_Pip1:g_casc1;
    int    eCool     =Use_Freq_Boost?Freq_Cooldown :Cooldown_Bars;
    int    eCascCool =Use_Freq_Boost?Freq_Casc_Cool:Casc_Cooldown;
 
@@ -380,8 +464,8 @@ void OnTick()
    double moveDn=(Hi(Casc_Bars,1)-c1)/pip, moveUp=(c1-Lo(Casc_Bars,1))/pip;
    bool cVol=(double)iVolume(_Symbol,Signal_TF,1)>=av*eCascVol;
    bool cSize=rng>avgC*1.1;
-   bool cascSell=Use_Cascade && bear>=eCascScore && moveDn>=eCascPip1 && cVol && h4bear && h1bear && rsi1<50 && sess && cascCool && c1<ma1 && (moveDn>=Casc_Pip3 || cSize);
-   bool cascBuy =Use_Cascade && bull>=eCascScore && moveUp>=eCascPip1 && cVol && h4bull && h1bull && rsi1>50 && sess && cascCool && c1>ma1 && (moveUp>=Casc_Pip3 || cSize);
+   bool cascSell=Use_Cascade && bear>=eCascScore && moveDn>=eCascPip1 && cVol && h4bear && h1bear && rsi1<50 && sess && cascCool && c1<ma1 && (moveDn>=g_casc3 || cSize);
+   bool cascBuy =Use_Cascade && bull>=eCascScore && moveUp>=eCascPip1 && cVol && h4bull && h1bull && rsi1>50 && sess && cascCool && c1>ma1 && (moveUp>=g_casc3 || cSize);
 
    bool finalBuy =buySig || cascBuy;
    bool finalSell=sellSig || cascSell;
@@ -394,7 +478,7 @@ void OnTick()
    double rmult=TierMult(entryScore)*TypeMult(isCasc);
    double slmult=AdaptiveSLMult();
    double sl_pips=atr1*slmult/pip;
-   sl_pips=MathMax(Min_SL_Pips,MathMin(sl_pips,Max_SL_Pips));
+   sl_pips=MathMax(g_minsl,MathMin(sl_pips,g_maxsl));
    bool valid=false; double lot=CalcLots(sl_pips,rmult,valid);
    if(!valid||lot<Min_Lot_Size) return;
 
@@ -402,13 +486,13 @@ void OnTick()
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
       double sl=e-P2Px(sl_pips), tp=e+P2Px(sl_pips*TP_Final_R);
-      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log("LONG | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bull)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Buy(lot,_Symbol,e,sl,tp,"GMC LONG")){ last_entry_bar=bar_idx; if(cascBuy) last_casc_bar=bar_idx; Log(_Symbol+" LONG | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bull)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
    else if(finalSell)
    {
       double e=SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double sl=e+P2Px(sl_pips), tp=e-P2Px(sl_pips*TP_Final_R);
-      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log("SHORT | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bear)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
+      if(trade.Sell(lot,_Symbol,e,sl,tp,"GMC SHORT")){ last_entry_bar=bar_idx; if(cascSell) last_casc_bar=bar_idx; Log(_Symbol+" SHORT | "+(isCasc?"casc":"conf")+" score "+IntegerToString(bear)+" | risk x"+DoubleToString(rmult,2)+" | lot "+DoubleToString(lot,2)); }
    }
 }
 

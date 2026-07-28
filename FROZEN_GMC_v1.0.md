@@ -1,8 +1,44 @@
 # GMC — the one strategy (frozen & validated)
 
-**This is the single, canonical strategy. Current version: `GMC v1.5`.**
-File: `GMC_v1.5.mq5`. Everything else in this repo is prior research and lives
+**This is the single, canonical strategy. Current version: `GMC v1.6`.**
+File: `GMC_v1.6.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
+
+## v1.6 (current) — multi-symbol autoscale: BUILT, pending per-symbol validation
+The honest answer to "give me more trades": more instruments, not looser
+gates. Behind one switch (`Use_Symbol_Autoscale`), every constant that was
+tuned in XAUUSD pips is re-derived from the traded symbol's own D1 ATR,
+recomputed on each new signal bar so it tracks changing volatility:
+
+| Constant | Gold frozen value | Autoscale rule |
+|---|---|---|
+| Min_SL_Pips | 70 | 0.250 x D1 ATR |
+| Max_SL_Pips | 380 | 1.350 x D1 ATR |
+| Vola_Dist_Pips | 60 | 0.210 x D1 ATR |
+| Casc_Pip1 | 8 | 0.030 x D1 ATR |
+| Casc_Pip3 | 25 | 0.090 x D1 ATR |
+| Max_Spread_Points | 50 | 0.020 x D1 ATR |
+| Max_Lot_Size | 0.20 | notional <= 12x balance |
+
+Also: pip size now handles 5-digit FX and 3-digit JPY (autoscale only —
+the gold branch is untouched), and `Max_Open_Positions` (default 3) caps
+total GMC positions across ALL charts so several instances cannot stack
+unlimited concurrent risk. The existing daily-loss halt was already
+account-wide (it reads ACCOUNT_BALANCE), so it needed no change.
+
+`Use_Symbol_Autoscale = false` reproduces the exact XAUUSD baseline —
+the multipliers only APPROXIMATE gold's frozen numbers, so **gold keeps
+running with the switch OFF**; autoscale is for the new symbols only.
+
+VALIDATION PLAN (each symbol stands or falls on its own):
+1. Confirm no regression: XAUUSD, autoscale OFF, must reproduce
+   +£1,515.92 / PF 1.14 / 19.18% DD / 557 trades exactly.
+2. For each of XAGUSD, EURUSD, US30/NAS100: run M5, 2022.01.01-2026.07.27,
+   GBP 5,000, commissions on, autoscale ON.
+3. Keep a symbol only if it is profitable standalone with PF >= 1.10 and
+   max DD <= ~20% at 1% risk. Anything else is dropped — no averaging a
+   loser into the portfolio because gold carries it.
+4. Only then combine, and re-check portfolio drawdown with all charts live.
 
 ## v1.5 (current) — frequency boost: TESTED and REJECTED (switch stays OFF)
 **Canonical setting: Use_Freq_Boost = false** (exact frozen gates).
@@ -142,7 +178,7 @@ out-of-sample or it comes out):
 3. ATR-percentile adaptive SL/TP — TESTED & REJECTED (v1.3 A/B: PF 1.12 vs 1.17 matched control — switch stays OFF)
 4. Signal-type sizing (cascade full risk / confluence reduced) — TESTED, NO EFFECT (v1.4 clean A/B: 40p difference — switch stays OFF; pure-confluence entries are near-nonexistent)
 5. Frequency boost (relaxed cascade gates) — TESTED & REJECTED (v1.5 A/B: 2.4x trades but £68 vs £79 profit per 1% DD — switch stays OFF)
-6. Multi-symbol expansion — the honest route to more trades: run the
+6. Multi-symbol expansion — BUILT (v1.6, pending per-symbol validation): run the
    proven frozen gates on additional instruments (silver, EURUSD, an
    index), each validated separately with its own A/B. Four symbols at
    2-3 trades/week each = 8-12 trades/week with no quality dilution.
