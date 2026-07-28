@@ -149,6 +149,12 @@ both must clear PF 1.0 on **2026 and 2022** to count:
 2. **Longs only.** `InpSellsEnabled = false`. Shorts win 33.88% vs longs 41.15% — a
    7-point gap across 242 vs 401 trades. Worth one test; be aware Jan–Jul 2026 gold
    trended up, so a longs-only result that only works in 2026 is a curve fit.
+   > **Tested — failed the bar, but the most informative run.** PF 0.81, −£330.68.
+   > Loss halved, drawdown 62% → 43%, worst streak 21 → 12, and pre-cost damage per
+   > trade cut from −£0.44 to −£0.21. Still 4.9 points short of breakeven. Also: the
+   > window was *not* an uptrend — gold finished below where it started — so the curve-fit
+   > caveat above does not apply cleanly. See
+   > [`BACKTEST_EXCLUSIVE_ONE_2026_TEST2.md`](BACKTEST_EXCLUSIVE_ONE_2026_TEST2.md).
 
 If neither clears PF 1.0 in both windows, the honest conclusion is that **the Track B
 approach does not have an edge on XAUUSD M1**, and that belongs in this repo next to
