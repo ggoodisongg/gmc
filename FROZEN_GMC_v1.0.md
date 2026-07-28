@@ -4,7 +4,7 @@
 File: `GMC_v1.5.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
 
-## v1.5 (current) — frequency boost: BUILT, pending A/B
+## v1.5 (current) — frequency boost: TESTED, mixed — risk-matched re-test pending
 Owner asked for more than 2-3 trades/week. Since GMC is a cascade engine
 (v1.4 finding), the frequency levers are the cascade gates. Behind one
 switch (`Use_Freq_Boost`): cascade min score 4 -> 3, volume spike
@@ -16,6 +16,48 @@ net profit >= control with DD not materially worse. HONEST WARNING
 recorded up front: relaxed gates admit trades the frozen filters
 rejected for a reason — expect lower per-trade quality; if profit
 degrades, the levers get dialed back or the layer comes out.
+
+A/B RESULT (M5, 2022.01.01-2026.07.27, GBP 5,000, commissions on,
+7% tick quality, both runs same build):
+| | OFF (control) | ON |
+|---|---|---|
+| Trades | 557 | 1,332 |
+| Net | +£1,515.92 | +£2,598.15 |
+| PF | 1.14 | 1.10 |
+| Max DD | 19.18% | 38.21% |
+| Sharpe | 3.35 | 2.54 |
+| Worst streak | 15 | 17 |
+
+Verdict: MIXED. Passes the trade-count and profit tests (2.4x trades,
++71% net) but fails the drawdown test decisively (38.21% vs the ~22%
+ceiling set before the run). PF and Sharpe both fell, so the extra
+trades are individually lower quality — the profit came from volume,
+not from new edge. The boost adds leverage, not alpha.
+
+DECIDING TEST (pending): boost ON with Risk_Percent = 0.5 instead of
+1.0. Drawdown scales roughly linearly with risk, so this should bring
+DD back to ~19-20% and make the comparison risk-matched. If profit at
+matched drawdown still beats the control's £1,516, the layer is a
+genuine improvement and stays; if not, it was borrowing from risk
+tolerance and the frozen gates win.
+
+THIRD DATA POINT (same build, boost OFF, Risk_Percent = 1.5):
++£2,190.12 / PF 1.13 / 28.30% balance DD (28.94% equity) / 557 trades
+/ Sharpe 3.01 / worst streak 15 (-£964.41) / commissions -£395.62.
+Versus the 1% control (+£1,515.92 / 19.18% DD) that is +44.5% profit
+for +47.5% drawdown with PF flat (1.14 -> 1.13) — clean confirmation
+that profit and drawdown both scale near-linearly with Risk_Percent.
+Raising risk is a dial, not an edge.
+
+RISK-NORMALISED READ (profit per 1% of max drawdown):
+- frozen gates @ 1.0% risk: £1,516 / 19.18% = ~£79
+- frozen gates @ 1.5% risk: £2,190 / 28.30% = ~£77
+- freq boost   @ 1.0% risk: £2,598 / 38.21% = ~£68
+The frozen gates are ~14% more drawdown-efficient than the boost at
+every risk level tested. On the evidence in hand the boost buys trade
+count and gross profit but no risk-adjusted improvement. The 0.5%-risk
+boost run is still the cleanest confirmation, but the layer is already
+failing on this measure.
 
 ## v1.4 (current) — signal-type sizing: TESTED, NO EFFECT (switch stays OFF)
 Cascade entries keep full 1% risk; pure 6/6 confluence entries trade at
