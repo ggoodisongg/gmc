@@ -131,6 +131,37 @@ hypothesis written down first.
 **Do not run a cost-reduction variation before the 2022 result.** There is no point tuning
 friction on a configuration that has not been shown to survive a second regime.
 
+### 6a. A confound, written down before the run
+
+2022 gold trades near **$1,800**. 1.5 × ATR(M1) there is well below **$1.00**, so
+`InpMinSLUsd = 1.00` **binds on most trades** — the finding already recorded in
+[`BACKTEST_EXCLUSIVE_ONE_2022.md`](BACKTEST_EXCLUSIVE_ONE_2022.md) §3. On 2026 gold the same
+input never binds; stops run $2.16–$3.91.
+
+That matters more now than it did then. Test 3 shows costs at **118–162% of the loss** and
+the gross edge at **+£0.27/trade**. A stop three times tighter does not shrink the spread —
+it triples the spread's share of every trade. A 2022 failure would therefore be **ambiguous**
+between two causes:
+
+1. BREAK-only has no edge outside 2026 → the configuration is a curve fit, stop.
+2. The stop floor is eating the edge at a price level it was never calibrated for → the
+   signal is untested, not refuted.
+
+**The diagnostic, fixed in advance:** read the `S / L` column of the 2022 order list. If most
+entries show a stop **exactly $1.00** from entry, cause 2 is live and the run does not settle
+anything — it gets repeated **once**, with `InpMinSLUsd` scaled to the regime
+(≈ $0.45, holding stop ÷ price constant against 2026's ~$2.80 on ~$4,700 gold) and nothing
+else changed. If stops are comfortably above the floor and it still fails, that is cause 1
+and the line stops there.
+
+Stating this now so that a bad 2022 result cannot be rationalised after the fact, and so that
+the one permitted follow-up is defined before its trigger is observed rather than after.
+
+**Prediction for the 2022 run:** PF **0.65–0.85**, failing the bar, with the stop floor
+binding on a majority of trades. If PF comes in above 1.0 on 2022 as configured, that is a
+stronger result than anything predicted here and should be treated with suspicion, not
+celebration, until the order list is read.
+
 ## 7. Standing
 
 PF 0.89 is still a losing configuration and still does not go on any account. But this is the
