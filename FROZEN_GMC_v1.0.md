@@ -4,7 +4,12 @@
 File: `GMC_v1.5.mq5`. Everything else in this repo is prior research and lives
 in `archive/` (kept for the record, not for use).
 
-## v1.5 (current) — frequency boost: TESTED, mixed — risk-matched re-test pending
+## v1.5 (current) — frequency boost: TESTED and REJECTED (switch stays OFF)
+**Canonical setting: Use_Freq_Boost = false** (exact frozen gates).
+The code stays in the file, switched off. Rejected on profit-per-unit-
+of-drawdown: see the risk-normalised table below. More trades, less
+efficiency. The route to more trades is more SYMBOLS, not looser gates.
+
 Owner asked for more than 2-3 trades/week. Since GMC is a cascade engine
 (v1.4 finding), the frequency levers are the cascade gates. Behind one
 switch (`Use_Freq_Boost`): cascade min score 4 -> 3, volume spike
@@ -136,8 +141,12 @@ out-of-sample or it comes out):
 2. Score-tiered risk — TESTED & REJECTED (v1.2 A/B: PF 1.09 vs 1.24 — switch stays OFF)
 3. ATR-percentile adaptive SL/TP — TESTED & REJECTED (v1.3 A/B: PF 1.12 vs 1.17 matched control — switch stays OFF)
 4. Signal-type sizing (cascade full risk / confluence reduced) — TESTED, NO EFFECT (v1.4 clean A/B: 40p difference — switch stays OFF; pure-confluence entries are near-nonexistent)
-5. Frequency boost (relaxed cascade gates) — BUILT (v1.5, pending A/B validation)
-6. Regime-aware exits + anti-martingale risk throttle
+5. Frequency boost (relaxed cascade gates) — TESTED & REJECTED (v1.5 A/B: 2.4x trades but £68 vs £79 profit per 1% DD — switch stays OFF)
+6. Multi-symbol expansion — the honest route to more trades: run the
+   proven frozen gates on additional instruments (silver, EURUSD, an
+   index), each validated separately with its own A/B. Four symbols at
+   2-3 trades/week each = 8-12 trades/week with no quality dilution.
+7. Regime-aware exits + anti-martingale risk throttle
 
 Confluence entry (MA50/RSI/volume/rejection-wick score 6/6 + H4/H1 trend gates
 + session + cascade) with a risk-managed engine (risk-% sizing, ATR stop with

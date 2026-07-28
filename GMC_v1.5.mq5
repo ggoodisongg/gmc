@@ -79,8 +79,8 @@ input bool   Use_Type_Sizing   = false;   // A/B showed no effect: leave false
 input double Risk_Mult_Cascade = 1.00;    // cascade entries: the proven profit engine
 input double Risk_Mult_Confl   = 0.50;    // pure 6/6 confluence entries: the weaker subset
 
-input group "--- Frequency Boost (v1.5 layer) ---"
-input bool   Use_Freq_Boost    = true;    // false = exact baseline gates (2-3 trades/week)
+input group "--- Frequency Boost (v1.5 layer — A/B REJECTED, keep false) ---"
+input bool   Use_Freq_Boost    = false;   // A/B: more trades but worse profit-per-drawdown. Leave false.
 input int    Freq_Casc_Score   = 3;       // cascade min score (frozen: 4)
 input double Freq_Casc_Vol     = 1.4;     // cascade volume spike multiple (frozen: 1.8)
 input double Freq_Casc_Pip1    = 6.0;     // cascade momentum trigger pips (frozen: 8.0)
