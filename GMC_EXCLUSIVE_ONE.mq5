@@ -167,9 +167,9 @@ input bool   InpUseRegime     = true;   // Regime gate (Kaufman ER)
 input int    InpERPeriod      = 30;     // ER period (M1 bars)
 input double InpERMin         = 0.40;   // ER minimum - FROZEN
 input bool   InpEnableBreak   = true;   // Class A: BREAK
-input bool   InpEnableFVG     = true;   // Class B: FVG
+input bool   InpEnableFVG     = false;  // Class B: FVG          [TEST 4: false]
 input bool   InpEnableSweep   = false;  // Class C: SWEEP
-input bool   InpSellsEnabled  = true;   // Sells enabled
+input bool   InpSellsEnabled  = false;  // Sells enabled          [TEST 4: false]
 
 input group "GMC EXCLUSIVE ONE — Execution"
 input bool   InpUsePending     = true;  // Pending stop-order entry
@@ -184,7 +184,7 @@ input double InpStopAtrMult    = 1.5;   // Stop = mult x ATR
 input double InpMinSLUsd       = 1.00;  // Min SL ($)
 input double InpMaxSLUsd       = 4.00;  // Max SL ($) - skip if hotter
 input double InpTP1R           = 1.5;   // TP1 (R) - partial
-input double InpBankR0Pct      = 33;    // Bank % at +1.0R
+input double InpBankR0Pct      = 0;     // Bank % at +1.0R        [TEST 4: 0]
 input double InpPartialPct     = 50;    // Partial % at TP1
 input double InpLock25R        = 1.25;  // Lock (R) at +2.5R
 input double InpLock40R        = 2.0;   // Lock (R) at +4.0R
@@ -193,7 +193,7 @@ input bool   InpManageOnTick   = false; // Milestones on every tick (OFF = match
 
 input group "GMC EXCLUSIVE ONE — Risk"
 input double InpBaseRiskPct    = 1.5;   // Base risk %/trade         [v3.1: 3.0]
-input double InpStrongMult     = 1.0;   // Strong-signal risk mult - FROZEN
+input double InpStrongMult     = 0.5;   // Strong-signal risk mult - FROZEN [TEST 4: 0.5]
 input bool   InpUseKelly       = false; // Adaptive Kelly            [v3.1: true]
 input int    InpKellyWindow    = 30;    // Kelly window (closed TRADES, not deals)
 input double InpKellyFrac      = 0.5;   // Kelly fraction
