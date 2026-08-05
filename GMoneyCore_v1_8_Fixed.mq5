@@ -29,6 +29,7 @@ input ENUM_TIMEFRAMES InpHigherTF = PERIOD_M15;
 input group "== Scoring =="
 input int    InpMaxScorePoints   = 8;     // number of scored criteria (#1,#2,#3,#4,#6,#9,#10,#16)
 input int    InpMinScoreOfMax    = 6;     // minimum earned points (out of InpMaxScorePoints) to trade
+input bool   InpRequireSweepGate = true;  // require #16 (Sweep + FVG) to pass, in addition to score
 input int    InpIsolateCriterion = 0;     // 0=composite score; else trade ONLY on this rule #
 
 input group "== Trade Management =="
@@ -418,7 +419,7 @@ void OnTick()
       if(InpIsolateCriterion > 0)
          filterPassed = CriterionPassed(res, InpIsolateCriterion);
       else
-         filterPassed = (res.earned >= InpMinScoreOfMax);
+         filterPassed = (res.earned >= InpMinScoreOfMax) && (!InpRequireSweepGate || res.ok16);
 
       if(!filterPassed) continue;
 
